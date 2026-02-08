@@ -12,4 +12,4 @@ FEISHU_RTM_ENABLED=true
 SAFE_DIRS=~/workspace
 CODEX_CMD_BLOCK=mkfs,shutdown,dd
 CODEX_CMD_CONFIRM=rm,kill
-CODEX_CMD_ALLOW=ls,cat,pwd,rg
+CODEX_CMD_ALLOW=ls,pwd,rg,cat,sed,head,tail,less,stat,whoami,uname,uptime,df,du,ps,top,htop,git,curl,wget,ping,traceroute,npm run

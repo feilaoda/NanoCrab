@@ -1,10 +1,12 @@
 import os from "os";
 import path from "path";
+import { spawn } from "child_process";
 
 import { CODEX_BACKEND, DATA_DIR, MAX_CONTEXT_MESSAGES, SAFE_DIRS } from "./config.js";
 import { resetCodexCliSession, resetCodexThread, runCodex } from "./codex/runner.js";
 import { logger } from "./logger.js";
 import {
+  addSafeDir,
   clearThreadIdForWorkspace,
   clearConversation,
   clearCliSessionIdForWorkspace,
@@ -13,12 +15,15 @@ import {
   createApproval,
   getCliSessionIdForWorkspace,
   getConversationBackend,
+  getConversationCliSessionId,
   getConversationPlugin,
+  getConversationThreadId,
   getConversationWorkspace,
   getEffectiveModel,
   getOrCreateConversation,
   getPendingApproval,
   getRecentMessages,
+  getSafeDirs,
   getThreadIdForWorkspace,
   getWorkspaceForCliSessionId,
   getWorkspaceForThreadId,
@@ -54,6 +59,8 @@ const CODEX_ONLY_COMMANDS = new Set([
   "mode",
   "model",
   "resume",
+  "status",
+  "git",
 ]);
 
 export async function handleInbound(
@@ -115,7 +122,7 @@ export async function handleInbound(
   if (!isPathAllowed(workspaceDir)) {
     await deps.sendMessage(
       msg.chatId,
-      `当前工作目录不在安全目录内，请先设置允许的目录。\n允许目录：${SAFE_DIRS.join(", ") || "(未限制)"}\n使用：/dir set <path>`,
+      `当前工作目录不在安全目录内，请先设置允许的目录。\n允许目录：${getAllowedDirs().join(", ") || "(未限制)"}\n使用：/dir set <path>`,
     );
     return;
   }
@@ -198,10 +205,15 @@ function expandHomeDir(input: string): string {
   return input;
 }
 
+function getAllowedDirs(): string[] {
+  return [...SAFE_DIRS, ...getSafeDirs()];
+}
+
 function isPathAllowed(target: string): boolean {
-  if (SAFE_DIRS.length === 0) return true;
+  const allowed = getAllowedDirs();
+  if (allowed.length === 0) return true;
   const resolved = path.resolve(target);
-  for (const root of SAFE_DIRS) {
+  for (const root of allowed) {
     const normalized = path.resolve(root);
     if (resolved === normalized) return true;
     if (resolved.startsWith(`${normalized}${path.sep}`)) return true;
@@ -260,8 +272,28 @@ async function handleCommand(
       await deps.sendMessage(chatId, "当前模式：CLI（workspace-write，执行前可能需要确认）。");
       return;
     }
+    case "status": {
+      const workspaceDir = resolveWorkspaceDir(conversationId);
+      const backend = (getConversationBackend(conversationId) || CODEX_BACKEND).toLowerCase();
+      const backendLabel = backend === "sdk" ? "SDK" : "CLI";
+      const cliSessionId =
+        getConversationCliSessionId(conversationId) || getCliSessionIdForWorkspace(workspaceDir);
+      const threadId =
+        getConversationThreadId(conversationId) || getThreadIdForWorkspace(workspaceDir);
+      const lines = [
+        `目录：${workspaceDir}`,
+        `后端：${backendLabel}`,
+        `CLI session：${cliSessionId || "(无)"}`,
+        `SDK thread：${threadId || "(无)"}`,
+      ];
+      await deps.sendMessage(chatId, lines.join("\n"));
+      return;
+    }
     case "dir":
       await handleWorkspaceCommand(command.args, conversationId, deps, chatId);
+      return;
+    case "git":
+      await handleGitCommand(command.args, conversationId, deps, chatId);
       return;
     case "resume": {
       if (command.args.length < 1) {
@@ -291,7 +323,7 @@ async function handleCommand(
         if (!isPathAllowed(workspaceDir)) {
           await deps.sendMessage(
             chatId,
-            `当前工作目录不在安全目录内，请先设置允许的目录。\n允许目录：${SAFE_DIRS.join(", ") || "(未限制)"}\n使用：/dir set <path>`,
+            `当前工作目录不在安全目录内，请先设置允许的目录。\n允许目录：${getAllowedDirs().join(", ") || "(未限制)"}\n使用：/dir set <path>`,
           );
           return;
         }
@@ -316,7 +348,7 @@ async function handleCommand(
       if (!isPathAllowed(workspaceDir)) {
         await deps.sendMessage(
           chatId,
-          `当前工作目录不在安全目录内，请先设置允许的目录。\n允许目录：${SAFE_DIRS.join(", ") || "(未限制)"}\n使用：/dir set <path>`,
+          `当前工作目录不在安全目录内，请先设置允许的目录。\n允许目录：${getAllowedDirs().join(", ") || "(未限制)"}\n使用：/dir set <path>`,
         );
         return;
       }
@@ -412,22 +444,167 @@ async function handleWorkspaceCommand(
 
   if (args[0] === "set" && args.length >= 2) {
     const rawPath = args.slice(1).join(" ");
-    const workspaceDir = path.resolve(expandHomeDir(rawPath));
+    const expanded = expandHomeDir(rawPath);
+    const baseDir = resolveWorkspaceDir(conversationId);
+    const workspaceDir = path.isAbsolute(expanded)
+      ? path.resolve(expanded)
+      : path.resolve(baseDir, expanded);
+    addSafeDir(workspaceDir);
     if (!isPathAllowed(workspaceDir)) {
       await deps.sendMessage(
         chatId,
-        `目录不在安全范围内，已拒绝。\n允许目录：${SAFE_DIRS.join(", ") || "(未限制)"}`,
+        `目录不在安全范围内，已拒绝。\n允许目录：${getAllowedDirs().join(", ") || "(未限制)"}`,
       );
       return;
     }
     setConversationWorkspace(conversationId, workspaceDir);
     resetCodexThread(conversationId);
     resetCodexCliSession(conversationId);
-    await deps.sendMessage(chatId, `已设置工作目录：${workspaceDir}（已重置线程绑定）`);
+    const restoredCliSessionId = getCliSessionIdForWorkspace(workspaceDir);
+    const restoredThreadId = getThreadIdForWorkspace(workspaceDir);
+    if (restoredCliSessionId) {
+      setConversationCliSessionId(conversationId, restoredCliSessionId);
+    }
+    if (restoredThreadId) {
+      setConversationThreadId(conversationId, restoredThreadId);
+    }
+    const restoredNotes: string[] = [];
+    if (restoredCliSessionId) restoredNotes.push(`CLI session：${restoredCliSessionId}`);
+    if (restoredThreadId) restoredNotes.push(`SDK thread：${restoredThreadId}`);
+    const suffix = restoredNotes.length ? `\n已恢复绑定：${restoredNotes.join("，")}` : "";
+    await deps.sendMessage(chatId, `已设置工作目录：${workspaceDir}（已更新绑定）${suffix}`);
     return;
   }
 
   await deps.sendMessage(chatId, "用法：/dir 或 /dir set <path>");
+}
+
+async function handleGitCommand(
+  args: string[],
+  conversationId: string,
+  deps: RouterDeps,
+  chatId: string,
+): Promise<void> {
+  if (args.length === 0) {
+    await deps.sendMessage(chatId, "用法：/git ci [message] 或 /git push");
+    return;
+  }
+  const workspaceDir = resolveWorkspaceDir(conversationId);
+  if (!isPathAllowed(workspaceDir)) {
+    await deps.sendMessage(
+      chatId,
+      `当前工作目录不在安全目录内，请先设置允许的目录。\n允许目录：${getAllowedDirs().join(", ") || "(未限制)"}\n使用：/dir set <path>`,
+    );
+    return;
+  }
+
+  try {
+    const repoCheck = await runShell("git", ["rev-parse", "--show-toplevel"], workspaceDir);
+    if (repoCheck.code !== 0) {
+      await deps.sendMessage(chatId, "当前目录不是 git 仓库，请先 /dir set 到仓库目录。");
+      return;
+    }
+
+    const sub = args[0];
+    if (sub === "ci" || sub === "commit") {
+      const status = await runShell("git", ["status", "--porcelain"], workspaceDir);
+      if (!status.stdout.trim()) {
+        await deps.sendMessage(chatId, "工作区无改动，无需提交。");
+        return;
+      }
+
+      const addResult = await runShell("git", ["add", "-A"], workspaceDir);
+      if (addResult.code !== 0) {
+        await deps.sendMessage(
+          chatId,
+          `git add 失败：${formatShellError(addResult)}`,
+        );
+        return;
+      }
+
+      const message = args.slice(1).join(" ").trim() ||
+        buildAutoCommitMessage(status.stdout);
+      const commitResult = await runShell("git", ["commit", "-m", message], workspaceDir);
+      if (commitResult.code !== 0) {
+        await deps.sendMessage(
+          chatId,
+          `git commit 失败：${formatShellError(commitResult)}`,
+        );
+        return;
+      }
+      await deps.sendMessage(
+        chatId,
+        `已提交：${message}\n${(commitResult.stdout || commitResult.stderr).trim() || "(无输出)"}`,
+      );
+      return;
+    }
+
+    if (sub === "push") {
+      const pushResult = await runShell("git", ["push"], workspaceDir);
+      if (pushResult.code !== 0) {
+        await deps.sendMessage(
+          chatId,
+          `git push 失败：${formatShellError(pushResult)}`,
+        );
+        return;
+      }
+      await deps.sendMessage(
+        chatId,
+        `推送完成。\n${(pushResult.stdout || pushResult.stderr).trim() || "(无输出)"}`,
+      );
+      return;
+    }
+
+    await deps.sendMessage(chatId, "用法：/git ci [message] 或 /git push");
+  } catch (err) {
+    await deps.sendMessage(chatId, `git 执行失败：${String(err)}`);
+  }
+}
+
+type ShellResult = { code: number; stdout: string; stderr: string };
+
+function buildAutoCommitMessage(statusOutput: string): string {
+  const lines = statusOutput.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const files = lines.map((line) => {
+    const trimmed = line.replace(/^\?\?\s+/, "").replace(/^[A-Z.][A-Z.]\s+/, "");
+    return trimmed.split(" -> ").slice(-1)[0];
+  }).filter(Boolean);
+  const unique = Array.from(new Set(files));
+  if (unique.length === 0) {
+    return "chore: update files";
+  }
+  if (unique.length === 1) {
+    return `chore: update ${unique[0]}`;
+  }
+  const preview = unique.slice(0, 3).join(", ");
+  const suffix = unique.length > 3 ? ", ..." : "";
+  return `chore: update ${unique.length} files (${preview}${suffix})`;
+}
+
+async function runShell(cmd: string, args: string[], cwd: string): Promise<ShellResult> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(cmd, args, { cwd, env: process.env });
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    proc.on("error", (err) => {
+      reject(err);
+    });
+    proc.on("close", (code) => {
+      resolve({ code: code ?? 1, stdout: stdout.trim(), stderr: stderr.trim() });
+    });
+  });
+}
+
+function formatShellError(result: ShellResult): string {
+  const output = result.stderr || result.stdout || `code=${result.code}`;
+  return output.trim();
 }
 
 function formatLastExchange(messages: Array<{ role: "user" | "assistant"; content: string }>): string {
@@ -482,8 +659,11 @@ function buildHelpMessage(plugin: string | null): string {
       "/sdk",
       "/backend",
       "/mode",
+      "/status",
       "/dir",
       "/dir set <path>",
+      "/git ci [message]",
+      "/git push",
       "/resume <id>",
       "/resume cli <sessionId>",
       "/resume sdk <threadId>",

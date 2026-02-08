@@ -55,8 +55,11 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - `/sdk` (switch to Codex SDK backend)
 - `/backend` (show current backend)
 - `/mode` (show execution mode)
+- `/status` (show current directory and session/thread ids)
 - `/dir` (show current workspace dir)
 - `/dir set <path>` (bind workspace dir)
+- `/git ci [message]` (stage & commit with auto message; omitted message uses git status summary)
+- `/git push` (push current branch)
 - `/resume <id>` (bind current backend id; SDK thread or CLI session)
 - `/resume cli <sessionId>` (bind CLI session id)
 - `/resume sdk <threadId>` (bind SDK thread id)
@@ -74,6 +77,7 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - CLI sessions are stored per workspace; use `/resume cli <sessionId>` to continue a CLI session.
 - Commands can be controlled via `CODEX_CMD_BLOCK` (forbidden), `CODEX_CMD_CONFIRM` (require confirmation), and `CODEX_CMD_ALLOW` (auto-execute without confirmation).
 - `SAFE_DIRS` restricts which directories can be used by `/dir set` and as working roots. When unset, it defaults to the project root.
+- `/dir set` 会自动把目标目录加入运行时安全列表（不改动 `.env`）。
 
 ## Operations
 - Feishu RTM setup and verification: see `docs/operations.md`.
