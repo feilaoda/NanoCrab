@@ -1,0 +1,15 @@
+
+FEISHU_API_BASE=https://open.feishu.cn
+FEISHU_APP_ID=cli_xxxxx
+FEISHU_APP_SECRET=xxxx
+#FEISHU_VERIFICATION_TOKEN=xxxx
+#FEISHU_ENCRYPT_KEY=xxxx
+
+
+FEISHU_BOT_NAME=NanoCrab
+FEISHU_RTM_ENABLED=true
+
+SAFE_DIRS=~/workspace
+CODEX_CMD_BLOCK=mkfs,shutdown,dd
+CODEX_CMD_CONFIRM=rm,kill
+CODEX_CMD_ALLOW=ls,cat,pwd,rg
