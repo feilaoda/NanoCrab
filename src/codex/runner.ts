@@ -417,14 +417,14 @@ type CommandPolicy = {
 };
 
 function parseProposal(output: string): ProposalResult | null {
-  const needsMatch = output.match(/NEEDS_APPROVAL:\s*(yes|no)/i);
+  const needsMatch = output.match(/NEEDS_APPROVAL\s*[:：]\s*(yes|no)/i);
   if (!needsMatch) return null;
 
   const needsApproval = needsMatch[1].toLowerCase() === "yes";
-  const summary = extractSection(output, "SUMMARY:");
-  const commands = parseListSection(extractSection(output, "COMMANDS:"));
-  const files = parseListSection(extractSection(output, "FILES:"));
-  const response = extractSection(output, "RESPONSE:");
+  const summary = extractSection(output, "SUMMARY");
+  const commands = parseListSection(extractSection(output, "COMMANDS"));
+  const files = parseListSection(extractSection(output, "FILES"));
+  const response = extractSection(output, "RESPONSE");
 
   return {
     needsApproval,
@@ -436,11 +436,13 @@ function parseProposal(output: string): ProposalResult | null {
   };
 }
 
-function extractSection(text: string, marker: string): string {
-  const idx = text.indexOf(marker);
-  if (idx === -1) return "";
-  const after = text.slice(idx + marker.length);
-  const nextMarker = after.search(/\n[A-Z_]+:\s*/);
+function extractSection(text: string, label: string): string {
+  const marker = new RegExp(`${label}\\s*[:：]`, "i");
+  const match = text.match(marker);
+  if (!match || match.index == null) return "";
+  const idx = match.index;
+  const after = text.slice(idx + match[0].length);
+  const nextMarker = after.search(/\n[A-Z_]+\s*[:：]\s*/);
   const section = nextMarker === -1 ? after : after.slice(0, nextMarker);
   return section.trim();
 }

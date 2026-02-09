@@ -1,13 +1,4 @@
-git diff 行数统计如下（新增/删除）：
+已加入 `/continue` 作为“继续”的别名，并在路由中统一使用归一化文本。  
+修改位置：`src/router.ts`（新增 `normalizeContinue`，在 pending/命令解析/事件分发/Codex 请求中使用）。
 
-- README.md: +26 / -1  
-- docs/issue.csv: +1 / -0  
-- env-example: +1 / -1  
-- package-lock.json: +1044 / -0  
-- package.json: +5 / -1  
-- src/config.ts: +3 / -0  
-- src/feishu/rtm.ts: +18 / -6  
-- src/index.ts: +13 / -1  
-- src/router.ts: +450 / -11  
-
-合计：1543 行新增，39 行删除（9 个文件）。
+需要我跑一次 `npm run typecheck` 吗？

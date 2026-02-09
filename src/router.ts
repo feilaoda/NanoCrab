@@ -52,6 +52,14 @@ export interface RouterDeps {
   sendMessage: (chatId: string, text: string) => Promise<void>;
 }
 
+function normalizeContinue(input: string): string {
+  const trimmed = input.trim();
+  if (trimmed.toLowerCase() === "/continue") {
+    return "继续";
+  }
+  return input;
+}
+
 const CONFIRM_PATTERN = /^(yes|y|确认|好|ok|执行)$/i;
 const REJECT_PATTERN = /^(no|n|取消|不要|stop)$/i;
 const CONFIRM_COMMANDS = new Set(["/confirm", "/approve"]);
@@ -88,12 +96,13 @@ export async function handleInbound(
 ): Promise<void> {
   const conversationId = getOrCreateConversation(msg.chatId, msg.isGroup);
   const plugin = getConversationPlugin(conversationId);
+  const normalizedText = normalizeContinue(msg.text);
 
   const pending = getPendingApproval(conversationId);
   if (pending) {
-    const text = msg.text.trim();
+    const text = normalizedText.trim();
     const lower = text.toLowerCase();
-    if (REJECT_COMMANDS.has(lower)) {
+    if (REJECT_COMMANDS.has(lower) || lower.startsWith("/cancel") || lower.startsWith("/reject")) {
       updateApprovalStatus(pending.id, "rejected");
       await deps.sendMessage(msg.chatId, "已取消执行。可以继续提新的需求。");
       return;
@@ -104,7 +113,12 @@ export async function handleInbound(
       await deps.sendMessage(msg.chatId, "已退出当前插件，并取消待确认操作。");
       return;
     }
-    if (CONFIRM_COMMANDS.has(lower) || CONFIRM_PATTERN.test(text)) {
+    if (
+      CONFIRM_COMMANDS.has(lower)
+      || lower.startsWith("/confirm")
+      || lower.startsWith("/approve")
+      || CONFIRM_PATTERN.test(text)
+    ) {
       updateApprovalStatus(pending.id, "approved");
       await handleApprovalExecution(pending.payload, deps, conversationId, msg.chatId);
       return;
@@ -122,7 +136,7 @@ export async function handleInbound(
     return;
   }
 
-  const command = parseCommand(msg.text);
+  const command = parseCommand(normalizedText);
   if (command) {
     await handleCommand(command, conversationId, plugin, deps, msg.chatId);
     return;
@@ -143,7 +157,7 @@ export async function handleInbound(
     await manager.handleEvent(
       plugin,
       "message_received",
-      { text: msg.text, timestamp: msg.timestamp },
+      { text: normalizedText, timestamp: msg.timestamp },
       {
         conversationId,
         chatId: msg.chatId,
@@ -170,13 +184,13 @@ export async function handleInbound(
 
   const request: AgentRequest = {
     conversationId,
-    userText: msg.text,
+    userText: normalizedText,
     modelOverride,
     backendOverride,
     contextMessages,
   };
 
-  saveMessage(conversationId, "user", msg.text, msg.timestamp);
+  saveMessage(conversationId, "user", normalizedText, msg.timestamp);
 
   try {
     const forceExecute = getConfirmNext(conversationId);
@@ -192,6 +206,15 @@ export async function handleInbound(
         return;
       }
       if (response.text) {
+        const inlineApproval = parseInlineApproval(response.text);
+        if (inlineApproval) {
+          const execResponse = await runCodex(request, workspaceDir, "execute");
+          if (execResponse.type === "message") {
+            saveMessage(conversationId, "assistant", execResponse.text);
+            await deps.sendMessage(msg.chatId, execResponse.text || "(无输出)");
+          }
+          return;
+        }
         saveMessage(conversationId, "assistant", response.text);
         await deps.sendMessage(msg.chatId, response.text);
       }
@@ -212,6 +235,18 @@ export async function handleInbound(
     }
 
     if (response.text) {
+      const inlineApproval = parseInlineApproval(response.text);
+      if (inlineApproval) {
+        const payload = JSON.stringify({ type: "codex", request, workspaceDir });
+        const approvalId = `appr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        createApproval(approvalId, conversationId, payload);
+        const preface = inlineApproval.response ? `${inlineApproval.response}\n\n` : "";
+        await deps.sendMessage(
+          msg.chatId,
+          `${preface}需要确认后执行。\n摘要：${inlineApproval.summary || "准备执行更改"}\n回复“确认”继续，回复“取消”终止。`,
+        );
+        return;
+      }
       saveMessage(conversationId, "assistant", response.text);
       await deps.sendMessage(msg.chatId, response.text);
     }
@@ -270,6 +305,85 @@ function parseCommand(text: string): { name: string; args: string[] } | null {
   const name = parts[0].slice(1);
   const args = parts.slice(1);
   return { name, args };
+}
+
+async function handleConfirmLast(
+  conversationId: string,
+  deps: RouterDeps,
+  chatId: string,
+): Promise<void> {
+  setConfirmNext(conversationId, false);
+  const recent = getRecentMessages(conversationId, Math.max(MAX_CONTEXT_MESSAGES, 50));
+  let lastUserText: string | null = null;
+  for (let i = recent.length - 1; i >= 0; i -= 1) {
+    const msg = recent[i];
+    if (msg?.role === "user" && msg.content && !msg.content.trim().startsWith("/")) {
+      lastUserText = msg.content;
+      break;
+    }
+  }
+  if (!lastUserText) {
+    await deps.sendMessage(chatId, "没有可执行的上一条需求。请直接发送你的需求。");
+    return;
+  }
+
+  const workspaceDir = resolveWorkspaceDir(conversationId);
+  if (!isPathAllowed(workspaceDir)) {
+    await deps.sendMessage(
+      chatId,
+      `当前工作目录不在安全目录内，请先设置允许的目录。\n允许目录：${getAllowedDirs().join(", ") || "(未限制)"}\n使用：/dir set <path>`,
+    );
+    return;
+  }
+
+  setConversationBackend(conversationId, "cli");
+  const modelOverride = getEffectiveModel(conversationId) || undefined;
+  const request: AgentRequest = {
+    conversationId,
+    userText: lastUserText,
+    modelOverride,
+    backendOverride: "cli",
+    contextMessages: recent,
+  };
+
+  try {
+    const response = await runCodex(request, workspaceDir, "proposal");
+    const inlineApproval = response.text ? parseInlineApproval(response.text) : null;
+    if (response.type === "needs_approval" || inlineApproval) {
+      const execResponse = await runCodex(request, workspaceDir, "execute");
+      if (execResponse.type === "message") {
+        saveMessage(conversationId, "assistant", execResponse.text);
+        await deps.sendMessage(chatId, execResponse.text || "(无输出)");
+      }
+      return;
+    }
+    if (response.text) {
+      saveMessage(conversationId, "assistant", response.text);
+      await deps.sendMessage(chatId, response.text);
+    }
+  } catch (err) {
+    logger.error({ err }, "Confirm last execution failed");
+    await deps.sendMessage(chatId, "执行失败，请稍后重试。");
+  }
+}
+
+type InlineApproval = {
+  summary: string;
+  response: string;
+};
+
+function parseInlineApproval(text: string): InlineApproval | null {
+  const needsMatch = text.match(/NEEDS_APPROVAL\s*[:：]\s*(yes|no)/i);
+  if (!needsMatch || needsMatch[1].toLowerCase() !== "yes") return null;
+  const summary = extractInlineSection(text, "SUMMARY");
+  const response = extractInlineSection(text, "RESPONSE");
+  return { summary, response };
+}
+
+function extractInlineSection(text: string, label: string): string {
+  const pattern = new RegExp(`${label}\\s*[:：]\\s*([\\s\\S]*?)(\\n[A-Z_]+\\s*[:：]|$)`, "i");
+  const match = text.match(pattern);
+  return match?.[1]?.trim() || "";
 }
 
 function resolveWorkspaceDir(conversationId: string): string {
@@ -380,6 +494,11 @@ async function handleCommand(
       await handleGitCommand(command.args, conversationId, deps, chatId);
       return;
     case "confirm": {
+      const sub = command.args[0];
+      if (sub === "--last" || sub === "last") {
+        await handleConfirmLast(conversationId, deps, chatId);
+        return;
+      }
       const backend = (getConversationBackend(conversationId) || CODEX_BACKEND).toLowerCase();
       if (backend !== "cli") {
         setConversationBackend(conversationId, "cli");
@@ -829,7 +948,7 @@ function buildHelpMessage(plugin: string | null): string {
       "/status",
       "/dir",
       "/dir set <path>",
-      "/confirm",
+      "/confirm [--last]",
       "/cancel",
       "/restart",
       "/git ci [message]",

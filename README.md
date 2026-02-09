@@ -68,6 +68,7 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - `/dir` (show current workspace dir)
 - `/dir set <path>` (bind workspace dir)
 - `/confirm` (approve pending execution)
+- `/confirm --last` (execute the last user request immediately)
 - `/cancel` (cancel pending execution or one-shot write mode)
 - `/restart` (restart the service using RESTART_CMD; will notify “服务已重启。” once connected)
 - `/git ci [message]` (stage & commit with auto message; omitted message uses git status summary)
@@ -102,6 +103,7 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - `SAFE_DIRS` restricts which directories can be used by `/dir set` and as working roots. When unset, it defaults to the project root.
 - `/dir set` 会自动把目标目录加入运行时安全列表（不改动 `.env`）。
 - `/confirm` 在无待确认操作时，会切到 CLI 并开启一次性写入模式，下一条消息将自动执行。
+- 若看到 `NEEDS_APPROVAL` 但 `/confirm` 仍提示无待确认，通常是输出使用了全角冒号导致解析失败；已兼容 `:` 与 `：`。
 - `RESTART_CMD` controls what `/restart` launches (default: `npm run dev`).
 
 ## Operations
