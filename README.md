@@ -1,6 +1,6 @@
 # NanoCrab
 
-Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feishu SDK. No dependencies on NanoClaw.
+Feishu + Codex = NanoCrab
 
 ## Requirements
 - Node.js 20+
