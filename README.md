@@ -61,7 +61,6 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - `/model set <name>`
 - `/model set --global <name>`
 - `/cli [--write|--safe]` (switch to Codex CLI backend; `--write` auto-executes, `--safe` exits write mode)
-- `/sdk` (switch to Codex SDK backend)
 - `/backend` (show current backend)
 - `/mode` (show execution mode)
 - `/status` (show current directory and session/thread ids)
@@ -75,8 +74,6 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - `/git diff` (list changed files)
 - `/git push` (push current branch)
 - `/resume <id>` (bind current backend id; SDK thread or CLI session)
-- `/resume cli <sessionId>` (bind CLI session id)
-- `/resume sdk <threadId>` (bind SDK thread id)
 - `/reset --hard` (clear thread binding)
 - `/plugin list` (list installed plugins)
 - `/plugin info <name>` (show plugin info)
@@ -97,8 +94,7 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - Set `CODEX_BACKEND=sdk` to use the Codex SDK thread-based backend.
 - By default, you must enter `/codex` to start using Codex.
 - SDK backend will also read `~/.codex/auth.json` (api_key) and `~/.codex/config.toml` (base_url) if env vars are not set.
-- SDK threads are bound to workspace directories; switching back to `/sdk` will resume the thread for the same workspace unless you use `/reset --hard`.
-- CLI sessions are stored per workspace; use `/resume cli <sessionId>` to continue a CLI session.
+- CLI sessions are stored per workspace; use `/resume <id>` to continue a CLI session.
 - Commands can be controlled via `CODEX_CMD_BLOCK` (forbidden), `CODEX_CMD_CONFIRM` (require confirmation), and `CODEX_CMD_ALLOW` (auto-execute without confirmation).
 - `SAFE_DIRS` restricts which directories can be used by `/dir set` and as working roots. When unset, it defaults to the project root.
 - `/dir set` 会自动把目标目录加入运行时安全列表（不改动 `.env`）。

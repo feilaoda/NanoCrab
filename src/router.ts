@@ -69,7 +69,6 @@ const REJECT_COMMANDS = new Set(["/cancel", "/reject"]);
 const PLUGINS = ["codex"] as const;
 const CODEX_ONLY_COMMANDS = new Set([
   "cli",
-  "sdk",
   "backend",
   "dir",
   "mode",
@@ -233,27 +232,22 @@ export async function handleInbound(
     if (writeMode) {
       const response = await runCodex(request, workspaceDir, "proposal", { allowAutoExecute: false });
       if (response.type === "needs_approval") {
-        const payload = JSON.stringify({ type: "codex", request, workspaceDir });
-        createApproval(response.approvalId, conversationId, payload);
-        const preface = response.text ? `${response.text}\n\n` : "";
-        await deps.sendMessage(
-          msg.chatId,
-          `${preface}需要确认后执行。\n摘要：${response.summary}\n回复“确认”继续，回复“取消”终止。`,
-        );
+        const execResponse = await runCodex(request, workspaceDir, "execute");
+        if (execResponse.type === "message") {
+          saveMessage(conversationId, "assistant", execResponse.text);
+          await deps.sendMessage(msg.chatId, execResponse.text || "(无输出)");
+        }
         return;
       }
 
       if (response.text) {
         const inlineApproval = parseInlineApproval(response.text);
         if (inlineApproval) {
-          const payload = JSON.stringify({ type: "codex", request, workspaceDir });
-          const approvalId = `appr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-          createApproval(approvalId, conversationId, payload);
-          const preface = inlineApproval.response ? `${inlineApproval.response}\n\n` : "";
-          await deps.sendMessage(
-            msg.chatId,
-            `${preface}需要确认后执行。\n摘要：${inlineApproval.summary || "准备执行更改"}\n回复“确认”继续，回复“取消”终止。`,
-          );
+          const execResponse = await runCodex(request, workspaceDir, "execute");
+          if (execResponse.type === "message") {
+            saveMessage(conversationId, "assistant", execResponse.text);
+            await deps.sendMessage(msg.chatId, execResponse.text || "(无输出)");
+          }
           return;
         }
         if (response.blocked || response.parsed === false) {
@@ -511,7 +505,7 @@ async function handleCommand(
         if (wantsWrite) {
           setWriteMode(conversationId, true);
           setConfirmNext(conversationId, false);
-          await deps.sendMessage(chatId, "已切换到 CLI 并进入写入模式（无需二次确认，但仍遵守禁止/需确认策略）。");
+          await deps.sendMessage(chatId, "已切换到 CLI 并进入写入模式（除禁止命令外将自动执行）。");
           return;
         }
         if (wantsSafe) {
@@ -525,10 +519,6 @@ async function handleCommand(
         await deps.sendMessage(chatId, `已切换到 CLI 后端${suffix}。`);
         return;
       }
-    case "sdk":
-      setConversationBackend(conversationId, "sdk");
-      await deps.sendMessage(chatId, "已切换到 SDK 后端（线程持续对话）。");
-      return;
     case "backend": {
       const backend = (getConversationBackend(conversationId) || CODEX_BACKEND).toLowerCase();
       const label = backend === "sdk" ? "SDK（线程持续对话）" : "CLI（单次执行）";
@@ -586,13 +576,7 @@ async function handleCommand(
         await handleConfirmLast(conversationId, deps, chatId);
         return;
       }
-      const backend = (getConversationBackend(conversationId) || CODEX_BACKEND).toLowerCase();
-      if (backend !== "cli") {
-        setConversationBackend(conversationId, "cli");
-      }
-      setConfirmNext(conversationId, true);
-      const prefix = backend !== "cli" ? "已切换到 CLI。 " : "";
-      await deps.sendMessage(chatId, `${prefix}已进入一次性写入模式。下一条消息将自动执行。`);
+      await deps.sendMessage(chatId, "当前没有待确认的操作。如需执行上一条需求，请用 /confirm --last。");
       return;
     }
     case "restart": {
@@ -615,20 +599,15 @@ async function handleCommand(
     }
     case "resume": {
       if (command.args.length < 1) {
-        await deps.sendMessage(chatId, "用法：/resume <id> 或 /resume cli <sessionId> 或 /resume sdk <threadId>");
+        await deps.sendMessage(chatId, "用法：/resume <id>");
         return;
       }
       const modeArg = command.args[0];
-      const explicitMode = modeArg === "cli" || modeArg === "sdk";
       const resolvedBackend = (getConversationBackend(conversationId) || CODEX_BACKEND).toLowerCase();
-      const mode = explicitMode
-        ? modeArg
-        : resolvedBackend === "sdk"
-          ? "sdk"
-          : "cli";
-      const id = explicitMode ? command.args[1] : command.args[0];
+      const mode = resolvedBackend === "sdk" ? "sdk" : "cli";
+      const id = command.args[0];
       if (!id) {
-        await deps.sendMessage(chatId, "用法：/resume <id> 或 /resume cli <sessionId> 或 /resume sdk <threadId>");
+        await deps.sendMessage(chatId, "用法：/resume <id>");
         return;
       }
 
@@ -880,7 +859,7 @@ async function handleGitCommand(
     }
 
     if (sub === "diff") {
-      const diffResult = await runShell("git", ["diff", "--name-only"], workspaceDir);
+      const diffResult = await runShell("git", ["diff", "--numstat"], workspaceDir);
       if (diffResult.code !== 0) {
         await deps.sendMessage(
           chatId,
@@ -889,7 +868,16 @@ async function handleGitCommand(
         return;
       }
       const list = diffResult.stdout.trim();
-      await deps.sendMessage(chatId, list ? `变更文件：\n${list}` : "没有检测到未提交的变更。");
+      if (!list) {
+        await deps.sendMessage(chatId, "没有检测到未提交的变更。");
+        return;
+      }
+      const lines = list.split(/\r?\n/).map((line) => {
+        const [added, removed, file] = line.split(/\t+/);
+        if (!file) return line;
+        return `${file}: +${added || "0"} / -${removed || "0"}`;
+      });
+      await deps.sendMessage(chatId, `变更文件：\n${lines.join("\n")}`);
       return;
     }
 
@@ -1034,21 +1022,19 @@ function buildHelpMessage(plugin: string | null): string {
       "/model set <name>",
       "/model set --global <name>",
       "/cli [--write|--safe]",
-      "/sdk",
       "/backend",
       "/mode",
       "/status",
       "/dir",
       "/dir set <path>",
-      "/confirm [--last]",
+      "/confirm",
+      "/confirm --last",
       "/cancel",
       "/restart",
       "/git ci [message]",
-      "/git diff",
+      "/git diff (显示行数统计)",
       "/git push",
       "/resume <id>",
-      "/resume cli <sessionId>",
-      "/resume sdk <threadId>",
       "/reset --hard",
     );
     lines.push(
