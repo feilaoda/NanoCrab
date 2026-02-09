@@ -44,9 +44,7 @@ export const CODEX_CMD_CONFIRM = rawCmdConfirm === undefined
   : parseList(rawCmdConfirm);
 export const CODEX_CMD_ALLOW = parseList(rawCmdAllow || "");
 
-export const CODEX_BACKEND = (process.env.CODEX_BACKEND || "cli").toLowerCase();
-export const CODEX_SDK_API_KEY = process.env.CODEX_SDK_API_KEY || "";
-export const CODEX_SDK_BASE_URL = process.env.CODEX_SDK_BASE_URL || "";
+export const CODEX_BACKEND = "cli";
 export const CODEX_BIN = process.env.CODEX_BIN || "codex";
 export const CODEX_TIMEOUT_MS = Number(process.env.CODEX_TIMEOUT_MS || 300000);
 export const MAX_CONTEXT_MESSAGES = Number(process.env.MAX_CONTEXT_MESSAGES || 20);

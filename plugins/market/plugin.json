@@ -4,7 +4,7 @@
   "main": "index.js",
   "displayName": "Market",
   "description": "Market quotes and subscriptions",
-  "commands": ["market", "quote", "watch"],
+  "commands": ["market", "show", "watch"],
   "events": ["message_received"],
   "permissions": {
     "net": true

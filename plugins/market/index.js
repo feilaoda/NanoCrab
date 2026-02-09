@@ -106,13 +106,15 @@ export async function onCommand(cmd, args, ctx) {
   if (cmd === "market") {
     return handleMarketCommand(args, ctx);
   }
-  if (cmd === "quote") {
-    return handleMarketCommand(["quote", ...args], ctx);
+  if (cmd === "show") {
+    return handleMarketCommand(["show", ...args], ctx);
   }
   if (cmd === "watch") {
     return handleMarketCommand(["watch", ...args], ctx);
   }
-  ctx?.sendMessage?.("用法：/market quote <symbol> | /market watch add <symbol> --interval 5m");
+  ctx?.sendMessage?.(
+    "用法：/show <symbol> | /market show <symbol> | /market watch add <symbol> --interval 5m",
+  );
   return false;
 }
 
@@ -142,14 +144,14 @@ function parseMarketInterval(args) {
 async function handleMarketCommand(args, ctx) {
   const sub = (args[0] || "help").toLowerCase();
 
-  if (sub === "quote") {
+  if (sub === "show") {
     const symbol = args[1];
     if (!symbol) {
-      ctx?.sendMessage?.("用法：/market quote <symbol>");
+      ctx?.sendMessage?.("用法：/market show <symbol>");
       return true;
     }
     const normalized = normalizeMarketSymbol(symbol);
-    logAudit(ctx.chatId, "market.quote", JSON.stringify({ symbol: normalized }));
+    logAudit(ctx.chatId, "market.show", JSON.stringify({ symbol: normalized }));
     try {
       const quote = await getMarketQuote(normalized);
       ctx?.sendMessage?.(formatMarketQuote(quote));
@@ -229,7 +231,7 @@ async function handleMarketCommand(args, ctx) {
   }
 
   ctx?.sendMessage?.(
-    "用法：/market quote <symbol> | /market watch add <symbol> --interval 5m | /market watch list | /market watch remove <symbol> [--interval 5m]",
+    "用法：/market show <symbol> | /market watch add <symbol> --interval 5m | /market watch list | /market watch remove <symbol> [--interval 5m]",
   );
   return true;
 }

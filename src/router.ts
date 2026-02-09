@@ -3,7 +3,6 @@ import path from "path";
 import { spawn } from "child_process";
 
 import {
-  CODEX_BACKEND,
   DATA_DIR,
   MAX_CONTEXT_MESSAGES,
   PROJECT_ROOT,
@@ -11,24 +10,20 @@ import {
   RUNNER_ORIGIN,
   SAFE_DIRS,
 } from "./config.js";
-import { resetCodexCliSession, resetCodexThread, runCodex } from "./codex/runner.js";
+import { resetCodexCliSession, runCodex } from "./codex/runner.js";
 import { logger } from "./logger.js";
 import { getSharedPluginManager } from "./plugins/manager.js";
 import { logConversationEvent, logRestartRequest } from "./runtime_log.js";
 import {
   addSafeDir,
-  clearThreadIdForWorkspace,
   clearConversation,
   clearCliSessionIdForWorkspace,
   clearWorkspaceForCliSessionId,
-  clearWorkspaceForThreadId,
   createApproval,
   getCliSessionIdForWorkspace,
   getConfirmNext,
-  getConversationBackend,
   getConversationCliSessionId,
   getConversationPlugin,
-  getConversationThreadId,
   getConversationWorkspace,
   getWriteMode,
   getEffectiveModel,
@@ -37,9 +32,7 @@ import {
   getRecentMessages,
   getRuntimeInfo,
   getSafeDirs,
-  getThreadIdForWorkspace,
   getWorkspaceForCliSessionId,
-  getWorkspaceForThreadId,
   saveMessage,
   setCliSessionIdForWorkspace,
   setConfirmNext,
@@ -49,13 +42,10 @@ import {
   clearConversationPlugin,
   setConversationBackend,
   setConversationModel,
-  setConversationThreadId,
   setGlobalModel,
-  setThreadIdForWorkspace,
   setWriteMode,
   setRestartNotifyChatId,
   setWorkspaceForCliSessionId,
-  setWorkspaceForThreadId,
   updateApprovalStatus,
 } from "./store/db.js";
 import { AgentRequest, InboundMessage } from "./types.js";
@@ -76,9 +66,8 @@ const CONFIRM_PATTERN = /^(yes|y|确认|好|ok|执行)$/i;
 const REJECT_PATTERN = /^(no|n|取消|不要|stop)$/i;
 const CONFIRM_COMMANDS = new Set(["/confirm", "/approve"]);
 const REJECT_COMMANDS = new Set(["/cancel", "/reject"]);
-const PLUGINS = ["codex"] as const;
 const CODEX_ONLY_COMMANDS = new Set([
-  "cli",
+  "write",
   "backend",
   "dir",
   "mode",
@@ -133,7 +122,7 @@ async function sendCodexReply(
   meta?: CodexLogMeta,
   approvalCtx?: ApprovalContext,
 ): Promise<void> {
-  const backend = (getConversationBackend(conversationId) || CODEX_BACKEND).toLowerCase();
+  const backend = "cli";
   if (approvalCtx) {
     const inline = parseInlineApproval(text);
     if (inline) {
@@ -283,10 +272,7 @@ export async function handleInbound(
   }
 
   const modelOverride = getEffectiveModel(conversationId) || undefined;
-  const backendOverride = (getConversationBackend(conversationId) || undefined) as
-    | "cli"
-    | "sdk"
-    | undefined;
+  const backendOverride = "cli" as const;
   const workspaceDir = resolveWorkspaceDir(conversationId);
   if (!isPathAllowed(workspaceDir)) {
     await deps.sendMessage(
@@ -672,12 +658,6 @@ async function handleCommand(
   deps: RouterDeps,
   chatId: string,
 ): Promise<void> {
-  if (PLUGINS.includes(command.name as (typeof PLUGINS)[number])) {
-    setConversationPlugin(conversationId, command.name);
-    await deps.sendMessage(chatId, `已进入 ${command.name} 插件。输入 /help 查看可用指令。`);
-    return;
-  }
-
   if (command.name === "exit") {
     clearConversationPlugin(conversationId);
     await deps.sendMessage(chatId, "已退出当前插件。");
@@ -690,75 +670,40 @@ async function handleCommand(
   }
 
   switch (command.name) {
+    case "codex":
+      setConversationPlugin(conversationId, "codex");
+      await deps.sendMessage(chatId, "已进入 codex 插件。输入 /help 查看可用指令。");
+      return;
     case "help": {
       const manager = getPluginManager(deps);
       const pluginCommandLines = collectPluginCommandLines(manager);
       await deps.sendMessage(chatId, buildHelpMessage(plugin, pluginCommandLines));
       return;
     }
-    case "cli":
-      {
-        const wantsWrite = command.args.includes("--write") || command.args.includes("write");
-        const wantsSafe =
-          command.args.includes("--safe") ||
-          command.args.includes("safe") ||
-          command.args.includes("--ask") ||
-          command.args.includes("ask");
-        if (wantsWrite && wantsSafe) {
-          await deps.sendMessage(chatId, "用法：/cli 或 /cli --write 或 /cli --safe");
-          return;
-        }
-        setConversationBackend(conversationId, "cli");
-        if (wantsWrite) {
-          setWriteMode(conversationId, true);
-          setConfirmNext(conversationId, false);
-          await deps.sendMessage(chatId, "已切换到 CLI 并进入写入模式（除禁止命令外将自动执行）。");
-          return;
-        }
-        if (wantsSafe) {
-          setWriteMode(conversationId, false);
-          setConfirmNext(conversationId, false);
-          await deps.sendMessage(chatId, "已切换到 CLI，并退出写入模式。");
-          return;
-        }
-        const writeMode = getWriteMode(conversationId);
-        const suffix = writeMode ? "（写入模式已开启）" : "（执行前可能需要确认）";
-        await deps.sendMessage(chatId, `已切换到 CLI 后端${suffix}。`);
-        return;
-      }
+    case "write": {
+      setConversationBackend(conversationId, "cli");
+      setWriteMode(conversationId, true);
+      setConfirmNext(conversationId, false);
+      await deps.sendMessage(chatId, "已切换到 CLI 并进入写入模式（除禁止命令外将自动执行）。");
+      return;
+    }
     case "backend": {
-      const backend = (getConversationBackend(conversationId) || CODEX_BACKEND).toLowerCase();
-      const label = backend === "sdk" ? "SDK（线程持续对话）" : "CLI（单次执行）";
-      await deps.sendMessage(chatId, `当前后端：${label}`);
+      await deps.sendMessage(chatId, "当前后端：CLI（单次执行）");
       return;
     }
     case "mode": {
-      const backend = (getConversationBackend(conversationId) || CODEX_BACKEND).toLowerCase();
       const confirmNext = getConfirmNext(conversationId);
       const writeMode = getWriteMode(conversationId);
       const hints: string[] = [];
       if (writeMode) hints.push("持续自动执行");
       if (confirmNext) hints.push("下一条将自动执行");
       const hint = hints.length ? `（${hints.join("；")}）` : "";
-      if (backend === "sdk") {
-        const extra = writeMode ? "写入模式仅对 CLI 生效。" : "";
-        await deps.sendMessage(
-          chatId,
-          `当前模式：SDK（不执行本地命令/写文件）。需要执行请切换 /cli。${extra}${hint}`,
-        );
-        return;
-      }
       await deps.sendMessage(chatId, `当前模式：CLI（workspace-write，执行前可能需要确认）。${hint}`);
       return;
     }
     case "status": {
       const workspaceDir = resolveWorkspaceDir(conversationId);
-      const backend = (getConversationBackend(conversationId) || CODEX_BACKEND).toLowerCase();
-      const backendLabel = backend === "sdk" ? "SDK" : "CLI";
-      const cliSessionId =
-        getConversationCliSessionId(conversationId) || getCliSessionIdForWorkspace(workspaceDir);
-      const threadId =
-        getConversationThreadId(conversationId) || getThreadIdForWorkspace(workspaceDir);
+      const plugin = getConversationPlugin(conversationId);
       const confirmNext = getConfirmNext(conversationId);
       const writeMode = getWriteMode(conversationId);
       const runtimeInfo = getRuntimeInfo();
@@ -774,9 +719,8 @@ async function handleCommand(
         `PID：${runtimeInfo.pid ?? "(未知)"}`,
         `启动时间：${runtimeInfo.startedAt ?? "(未知)"}`,
         `目录：${workspaceDir}`,
-        `后端：${backendLabel}`,
-        `CLI session：${cliSessionId || "(无)"}`,
-        `SDK thread：${threadId || "(无)"}`,
+        "后端：CLI",
+        `当前插件：${plugin ?? "无"}`,
         `写入模式：${writeMode ? "on" : "off"}${confirmNext ? "（下一条自动执行）" : ""}`,
       ];
       await deps.sendMessage(chatId, lines.join("\n"));
@@ -820,42 +764,12 @@ async function handleCommand(
         await deps.sendMessage(chatId, "用法：/resume <id>");
         return;
       }
-      const modeArg = command.args[0];
-      const resolvedBackend = (getConversationBackend(conversationId) || CODEX_BACKEND).toLowerCase();
-      const mode = resolvedBackend === "sdk" ? "sdk" : "cli";
       const id = command.args[0];
       if (!id) {
         await deps.sendMessage(chatId, "用法：/resume <id>");
         return;
       }
-
-      if (mode === "cli") {
-        const mappedWorkspace = getWorkspaceForCliSessionId(id);
-        const workspaceDir = mappedWorkspace || resolveWorkspaceDir(conversationId);
-        if (mappedWorkspace) {
-          setConversationWorkspace(conversationId, mappedWorkspace);
-        }
-        if (!isPathAllowed(workspaceDir)) {
-          await deps.sendMessage(
-            chatId,
-            `当前工作目录不在安全目录内，请先设置允许的目录。\n允许目录：${getAllowedDirs().join(", ") || "(未限制)"}\n使用：/dir set <path>`,
-          );
-          return;
-        }
-        setConversationCliSessionId(conversationId, id);
-        setCliSessionIdForWorkspace(workspaceDir, id);
-        setWorkspaceForCliSessionId(id, workspaceDir);
-        setConversationBackend(conversationId, "cli");
-        const history = formatLastExchange(getRecentMessages(conversationId, 10));
-        await deps.sendMessage(
-          chatId,
-          `已绑定 CLI 会话：${id}\n${history}`,
-        );
-        return;
-      }
-
-      const threadId = id;
-      const mappedWorkspace = getWorkspaceForThreadId(threadId);
+      const mappedWorkspace = getWorkspaceForCliSessionId(id);
       const workspaceDir = mappedWorkspace || resolveWorkspaceDir(conversationId);
       if (mappedWorkspace) {
         setConversationWorkspace(conversationId, mappedWorkspace);
@@ -867,38 +781,28 @@ async function handleCommand(
         );
         return;
       }
-      setConversationThreadId(conversationId, threadId);
-      setThreadIdForWorkspace(workspaceDir, threadId);
-      setWorkspaceForThreadId(threadId, workspaceDir);
-      setConversationBackend(conversationId, "sdk");
-      resetCodexThread(conversationId);
+      setConversationCliSessionId(conversationId, id);
+      setCliSessionIdForWorkspace(workspaceDir, id);
+      setWorkspaceForCliSessionId(id, workspaceDir);
+      setConversationBackend(conversationId, "cli");
       const history = formatLastExchange(getRecentMessages(conversationId, 10));
-      await deps.sendMessage(
-        chatId,
-        `已绑定线程并切换到 SDK：${threadId}\n${history}`,
-      );
+      await deps.sendMessage(chatId, `已绑定 CLI 会话：${id}\n${history}`);
       return;
     }
     case "reset":
       clearConversation(conversationId);
-      resetCodexThread(conversationId);
       resetCodexCliSession(conversationId);
       if (command.args.includes("--hard") || command.args.includes("hard")) {
         const workspaceDir = resolveWorkspaceDir(conversationId);
-        const threadId = getThreadIdForWorkspace(workspaceDir);
         const cliSessionId = getCliSessionIdForWorkspace(workspaceDir);
-        clearThreadIdForWorkspace(workspaceDir);
-        if (threadId) {
-          clearWorkspaceForThreadId(threadId);
-        }
         clearCliSessionIdForWorkspace(workspaceDir);
         if (cliSessionId) {
           clearWorkspaceForCliSessionId(cliSessionId);
         }
-        await deps.sendMessage(chatId, "已清空当前会话记忆，并重置线程（hard reset）。");
+        await deps.sendMessage(chatId, "已清空当前会话记忆（hard reset）。");
         return;
       }
-      await deps.sendMessage(chatId, "已清空当前会话记忆（可通过同一目录恢复线程）。");
+      await deps.sendMessage(chatId, "已清空当前会话记忆（可通过同一目录恢复会话）。");
       return;
     case "model":
       await handleModelCommand(command.args, conversationId, deps, chatId);
@@ -988,19 +892,13 @@ async function handleWorkspaceCommand(
       return;
     }
     setConversationWorkspace(conversationId, workspaceDir);
-    resetCodexThread(conversationId);
     resetCodexCliSession(conversationId);
     const restoredCliSessionId = getCliSessionIdForWorkspace(workspaceDir);
-    const restoredThreadId = getThreadIdForWorkspace(workspaceDir);
     if (restoredCliSessionId) {
       setConversationCliSessionId(conversationId, restoredCliSessionId);
     }
-    if (restoredThreadId) {
-      setConversationThreadId(conversationId, restoredThreadId);
-    }
     const restoredNotes: string[] = [];
     if (restoredCliSessionId) restoredNotes.push(`CLI session：${restoredCliSessionId}`);
-    if (restoredThreadId) restoredNotes.push(`SDK thread：${restoredThreadId}`);
     const suffix = restoredNotes.length ? `\n已恢复绑定：${restoredNotes.join("，")}` : "";
     await deps.sendMessage(chatId, `已设置工作目录：${workspaceDir}（已更新绑定）${suffix}`);
     return;
@@ -1058,7 +956,7 @@ async function handlePluginCommandByManifest(
   if (handlers.length > 1) {
     await deps.sendMessage(
       chatId,
-      `命令 /${command.name} 存在冲突（多个插件声明）：${handlers.join(", ")}。请调整插件声明。`,
+      `命令 /${command.name} 存在冲突（多个插件声明）：${handlers.join(", ")}。请使用 /p <plugin> ${command.name} ...`,
     );
     return true;
   }
@@ -1325,7 +1223,7 @@ function collectPluginCommandLines(
 
 function buildHelpMessage(plugin: string | null, pluginCommandLines: string[]): string {
   const lines = ["可用指令：", "/help", "/exit"];
-  const pluginHint = "插件命令：/p <name> <cmd>（或直接 /<cmd>，需插件声明）";
+  const pluginHint = "插件命令：/p <name> [cmd]（或直接 /<cmd>，需唯一插件声明）";
   const pluginCommands =
     pluginCommandLines.length > 0
       ? ["插件命令（已启用）：", ...pluginCommandLines]
@@ -1342,7 +1240,7 @@ function buildHelpMessage(plugin: string | null, pluginCommandLines: string[]): 
       "/plugin runtime <name> isolate|embed",
       "/plugin sandbox <name> on|off",
       "/plugin use <name>",
-      "/p <name> <cmd>",
+      "/p <name> [cmd]",
       pluginHint,
       ...pluginCommands,
     );
@@ -1356,7 +1254,7 @@ function buildHelpMessage(plugin: string | null, pluginCommandLines: string[]): 
       "/model",
       "/model set <name>",
       "/model set --global <name>",
-      "/cli [--write|--safe]",
+      "/write",
       "/backend",
       "/mode",
       "/status",
@@ -1382,7 +1280,7 @@ function buildHelpMessage(plugin: string | null, pluginCommandLines: string[]): 
       "/plugin runtime <name> isolate|embed",
       "/plugin sandbox <name> on|off",
       "/plugin use <name>",
-      "/p <name> <cmd>",
+      "/p <name> [cmd]",
       pluginHint,
       ...pluginCommands,
     );
@@ -1400,7 +1298,7 @@ function buildHelpMessage(plugin: string | null, pluginCommandLines: string[]): 
     "/plugin approve <name>",
     "/plugin runtime <name> isolate|embed",
     "/plugin sandbox <name> on|off",
-    "/p <name> <cmd>",
+    "/p <name> [cmd]",
     pluginHint,
     ...pluginCommands,
   );
@@ -1621,18 +1519,23 @@ async function handlePluginDirect(
   chatId: string,
 ): Promise<void> {
   try {
-    if (args.length < 2) {
-      await deps.sendMessage(chatId, "用法：/p <plugin> <cmd> [args...]");
+    if (args.length < 1) {
+      await deps.sendMessage(chatId, "用法：/p <plugin> [cmd] [args...]");
       return;
     }
     const name = args[0];
-    const cmd = args[1];
-    const cmdArgs = args.slice(2);
     const manager = getPluginManager(deps);
     if (!manager.isInstalled(name) || !manager.isEnabled(name)) {
       await deps.sendMessage(chatId, `插件 ${name} 未安装或已禁用。`);
       return;
     }
+    if (args.length === 1) {
+      setConversationPlugin(conversationId, name);
+      await deps.sendMessage(chatId, `已进入 ${name} 插件。输入 /help 查看可用指令。`);
+      return;
+    }
+    const cmd = args[1];
+    const cmdArgs = args.slice(2);
     const workspaceDir = resolveWorkspaceDir(conversationId);
     await manager.handleCommand(
       name,

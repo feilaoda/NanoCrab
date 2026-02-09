@@ -13,7 +13,7 @@
 | 恒生 / 恒生指数 / 恒指 / HSI | ^HSI | 恒生指数 |
 | 国企指数 / HSCEI | ^HSCE | 恒生国企指数 |
 
-> 说明：英文别名不区分大小写，在 `/market quote <alias>` 中会自动转换。
+> 说明：英文别名不区分大小写，在 `/show <alias>` 或 `/market show <alias>` 中会自动转换。
 
 ## 常用ETF别名
 | 别名 | 代码 | 说明 |

@@ -26,9 +26,6 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
     # FEISHU_SDK_LOG_LEVEL=debug
     # Optional: Codex
     # CODEX_BIN=codex
-    # CODEX_BACKEND=cli   # cli | sdk
-    # CODEX_SDK_API_KEY=sk-...
-    # CODEX_SDK_BASE_URL=https://api.openai.com
     # SAFE_DIRS=/Users/feilaoda/workspace/ai/nanocrab   # comma separated
     # CODEX_CMD_BLOCK=mkfs,shutdown
     # CODEX_CMD_CONFIRM=rm,dd
@@ -60,7 +57,8 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - `/codex` (enter Codex plugin)
 - `/exit` (leave current plugin)
 - `/help`
-- `/market quote <symbol>`
+- `/show <symbol>`
+- `/market show <symbol>`
 - `/market watch add <symbol> --interval 1m|5m|15m`
 - `/market watch list`
 - `/market watch remove <symbol> [--interval 1m|5m|15m]`
@@ -68,7 +66,7 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - `/model`
 - `/model set <name>`
 - `/model set --global <name>`
-- `/cli [--write|--safe]` (switch to Codex CLI backend; `--write` auto-executes, `--safe` exits write mode)
+- `/write` (switch to Codex CLI backend and enter write mode)
 - `/backend` (show current backend)
 - `/mode` (show execution mode)
 - `/status` (show current directory, session/thread ids, and runner origin)
@@ -81,8 +79,8 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - `/git ci [message]` (stage & commit with auto message; omitted message uses git status summary)
 - `/git diff` (list changed files with stats)
 - `/git push` (push current branch)
-- `/resume <id>` (bind current backend id; SDK thread or CLI session)
-- `/reset --hard` (clear thread binding)
+- `/resume <id>` (bind CLI session id)
+- `/reset --hard` (clear session binding)
 - `/plugin list` (list installed plugins)
 - `/plugin info <name>` (show plugin info)
 - `/plugin install <path>` (install plugin from local path)
@@ -117,9 +115,7 @@ Endpoints:
 - `GET /health`
 - `POST /api/push` body: `{"chatId":"oc_xxx","text":"hello"}` with `Authorization: Bearer <token>`
 - If you don't set `/model`, Codex CLI will use its default from `~/.codex/config.toml`.
-- Set `CODEX_BACKEND=sdk` to use the Codex SDK thread-based backend.
 - By default, you must enter `/codex` to start using Codex.
-- SDK backend will also read `~/.codex/auth.json` (api_key) and `~/.codex/config.toml` (base_url) if env vars are not set.
 - CLI sessions are stored per workspace; use `/resume <id>` to continue a CLI session.
 - Commands can be controlled via `CODEX_CMD_BLOCK` (forbidden), `CODEX_CMD_CONFIRM` (require confirmation), and `CODEX_CMD_ALLOW` (auto-execute without confirmation).
 - `SAFE_DIRS` restricts which directories can be used by `/dir set` and as working roots. When unset, it defaults to the project root.

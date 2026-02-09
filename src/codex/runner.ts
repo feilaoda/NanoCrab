@@ -2,10 +2,7 @@ import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 
-import { Codex } from "@openai/codex-sdk";
-
 import {
-  CODEX_BACKEND,
   CODEX_BIN,
   CODEX_CMD_ALLOW,
   CODEX_CMD_BLOCK,
@@ -16,31 +13,15 @@ import {
 import { AgentRequest, AgentResponse } from "../types.js";
 import { logger } from "../logger.js";
 import {
-  clearConversationThreadId,
   clearConversationCliSessionId,
   getCliSessionIdForWorkspace,
   getConversationCliSessionId,
-  getConversationThreadId,
-  getThreadIdForWorkspace,
   setCliSessionIdForWorkspace,
   setConversationCliSessionId,
-  setConversationThreadId,
   setWorkspaceForCliSessionId,
-  setWorkspaceForThreadId,
-  setThreadIdForWorkspace,
 } from "../store/db.js";
-import { loadCodexSdkConfig } from "./sdk_config.js";
 
 export type CodexRunMode = "proposal" | "execute";
-
-type CodexThread = {
-  run: (prompt: string) => Promise<{ messages?: Array<{ content?: unknown }> }>;
-  id?: string;
-  threadId?: string;
-};
-
-const sdkThreads = new Map<string, CodexThread>();
-let sdkClient: Codex | null = null;
 
 export async function runCodex(
   request: AgentRequest,
@@ -48,265 +29,11 @@ export async function runCodex(
   mode: CodexRunMode,
   options?: { allowAutoExecute?: boolean },
 ): Promise<AgentResponse> {
-  const backend = request.backendOverride || CODEX_BACKEND;
-  if (backend === "sdk") {
-    return runCodexSdk(request, mode, workspaceDir, options);
-  }
   return runCodexCli(request, workspaceDir, mode, options);
-}
-
-export function resetCodexThread(conversationId: string): void {
-  sdkThreads.delete(conversationId);
-  clearConversationThreadId(conversationId);
 }
 
 export function resetCodexCliSession(conversationId: string): void {
   clearConversationCliSessionId(conversationId);
-}
-
-async function runCodexSdk(
-  request: AgentRequest,
-  mode: CodexRunMode,
-  workspaceDir?: string,
-  options?: { allowAutoExecute?: boolean },
-): Promise<AgentResponse> {
-  const timeoutLabel = `Codex SDK timed out after ${CODEX_TIMEOUT_MS}ms`;
-  const thread = await withTimeout(
-    getOrCreateThread(request.conversationId, workspaceDir),
-    CODEX_TIMEOUT_MS,
-    timeoutLabel,
-  );
-  const prompt = buildPrompt(request, mode);
-  const runPromise = request.modelOverride
-    ? (thread as unknown as { run: (p: string, o?: { model?: string }) => Promise<any> }).run(
-        prompt,
-        { model: request.modelOverride },
-      )
-    : thread.run(prompt);
-  const result = await withTimeout(runPromise, CODEX_TIMEOUT_MS, timeoutLabel);
-  const output = extractSdkOutput(result);
-  if (!output) {
-    logger.warn({ backend: "sdk", mode, result }, "Codex SDK output empty");
-  } else {
-    logger.info({ backend: "sdk", mode, output }, "Codex output");
-  }
-
-  if (mode === "execute") {
-    return { type: "message", text: output.trim() || "(empty response)" };
-  }
-
-  const parsed = parseProposal(output);
-  if (!parsed) {
-    return { type: "message", text: output.trim() || "(empty response)", parsed: false };
-  }
-
-  const policy = evaluateCommandPolicy(parsed.commands);
-  if (policy.blocked) {
-    return {
-      type: "message",
-      text: `命令被策略禁止：${policy.blockedCommands.join("; ")}`,
-      parsed: true,
-      blocked: true,
-    };
-  }
-
-  const needsApproval = computeApprovalDecision(parsed, policy);
-  if (!needsApproval) {
-    if (policy.autoExecute && options?.allowAutoExecute !== false) {
-      const execResponse = await runCodexSdk(request, "execute", workspaceDir, options);
-      if (execResponse.type === "message") {
-        return { ...execResponse, autoExecuted: true, parsed: true };
-      }
-      return execResponse;
-    }
-    return { type: "message", text: parsed.response || "(empty response)", parsed: true };
-  }
-
-  return {
-    type: "needs_approval",
-    text: parsed.response || "我准备执行更改，需要你的确认。",
-    approvalId: parsed.approvalId,
-    summary: parsed.summary || "准备执行更改",
-  };
-}
-
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(label));
-    }, ms);
-    promise
-      .then((value) => {
-        clearTimeout(timer);
-        resolve(value);
-      })
-      .catch((err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-  });
-}
-
-function getSdkClient(): Codex {
-  if (sdkClient) return sdkClient;
-  const resolved = loadCodexSdkConfig();
-  const options: Record<string, string> = {};
-  if (resolved.apiKey) options.apiKey = resolved.apiKey;
-  if (resolved.baseURL) options.baseURL = resolved.baseURL;
-  sdkClient = new (Codex as unknown as new (opts?: Record<string, string>) => Codex)(
-    Object.keys(options).length ? options : undefined,
-  );
-  return sdkClient;
-}
-
-async function getOrCreateThread(
-  conversationId: string,
-  workspaceDir?: string,
-): Promise<CodexThread> {
-  const cached = sdkThreads.get(conversationId);
-  if (cached) return cached;
-
-  const codex = getSdkClient();
-  const storedId = getConversationThreadId(conversationId);
-  const workspaceId = workspaceDir ? getThreadIdForWorkspace(workspaceDir) : null;
-  let thread: CodexThread | null = null;
-
-  if (storedId || workspaceId) {
-    const resume = (codex as unknown as { resumeThread?: (id: string) => Promise<CodexThread> })
-      .resumeThread;
-    const getThread = (codex as unknown as { getThread?: (id: string) => Promise<CodexThread> })
-      .getThread;
-    const getter = resume || getThread;
-    if (getter) {
-      try {
-        const id = storedId || workspaceId || "";
-        thread = await getter.call(codex, id);
-      } catch (err) {
-        logger.warn({ err }, "Failed to resume Codex thread; starting new thread");
-      }
-    }
-  }
-
-  if (!thread) {
-    thread = (await (codex as unknown as { startThread: () => Promise<CodexThread> }).startThread()) as
-      CodexThread;
-  }
-
-  const id = thread.id || thread.threadId;
-  if (id) {
-    setConversationThreadId(conversationId, id);
-    if (workspaceDir) {
-      setThreadIdForWorkspace(workspaceDir, id);
-      setWorkspaceForThreadId(id, workspaceDir);
-    }
-  }
-
-  sdkThreads.set(conversationId, thread);
-  return thread;
-}
-
-function extractSdkOutput(result: unknown): string {
-  const seen = new Set<unknown>();
-
-  const extractContentText = (content: unknown): string => {
-    if (typeof content === "string") return content;
-    if (Array.isArray(content)) {
-      return content
-        .map((part) => {
-          if (typeof part === "string") return part;
-          if (part && typeof part === "object" && "text" in part) {
-            const text = (part as { text?: unknown }).text;
-            return typeof text === "string" ? text : "";
-          }
-          if (part && typeof part === "object" && "value" in part) {
-            const value = (part as { value?: unknown }).value;
-            return typeof value === "string" ? value : "";
-          }
-          return "";
-        })
-        .join("")
-        .trim();
-    }
-    return "";
-  };
-
-  const extractFromMessages = (messages: unknown): string => {
-    if (!Array.isArray(messages)) return "";
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const msg = messages[i] as Record<string, unknown> | null;
-      if (!msg || typeof msg !== "object") continue;
-      const role = typeof msg.role === "string" ? msg.role : "";
-      const type = typeof msg.type === "string" ? msg.type : "";
-      if (role && role !== "assistant" && type !== "message") continue;
-      const content = extractContentText(msg.content);
-      if (content) return content;
-      const text = extractContentText(msg.text);
-      if (text) return text;
-    }
-    return "";
-  };
-
-  const extractFromOutput = (output: unknown): string => {
-    if (!Array.isArray(output)) return "";
-    for (let i = output.length - 1; i >= 0; i -= 1) {
-      const item = output[i] as Record<string, unknown> | null;
-      if (!item || typeof item !== "object") continue;
-      const type = typeof item.type === "string" ? item.type : "";
-      const role = typeof item.role === "string" ? item.role : "";
-      if (type && type !== "message" && role && role !== "assistant") continue;
-      const content = extractContentText(item.content);
-      if (content) return content;
-      const text = extractContentText(item.text);
-      if (text) return text;
-    }
-    return "";
-  };
-
-  const deepExtract = (value: unknown, depth: number): string => {
-    if (value == null || depth > 6) return "";
-    if (typeof value === "string") return value;
-    if (typeof value === "number" || typeof value === "boolean") return String(value);
-    if (Array.isArray(value)) {
-      const fromArray = extractFromMessages(value) || extractFromOutput(value);
-      if (fromArray) return fromArray;
-      for (let i = value.length - 1; i >= 0; i -= 1) {
-        const found = deepExtract(value[i], depth + 1);
-        if (found) return found;
-      }
-      return "";
-    }
-    if (typeof value === "object") {
-      if (seen.has(value)) return "";
-      seen.add(value);
-      const obj = value as Record<string, unknown>;
-
-      const directKeys = ["output_text", "outputText", "text", "final", "message"];
-      for (const key of directKeys) {
-        const found = deepExtract(obj[key], depth + 1);
-        if (found) return found;
-      }
-
-      const outputLike = extractFromOutput(obj.output) || extractFromMessages(obj.messages);
-      if (outputLike) return outputLike;
-
-      const contentLike = extractContentText(obj.content);
-      if (contentLike) return contentLike;
-
-      const nestedKeys = ["response", "result", "data"];
-      for (const key of nestedKeys) {
-        const found = deepExtract(obj[key], depth + 1);
-        if (found) return found;
-      }
-
-      for (const key of Object.keys(obj)) {
-        const found = deepExtract(obj[key], depth + 1);
-        if (found) return found;
-      }
-    }
-    return "";
-  };
-
-  return deepExtract(result, 0).trim();
 }
 
 async function runCodexCli(

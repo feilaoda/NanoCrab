@@ -1,9 +1,8 @@
 NEEDS_APPROVAL: no
-SUMMARY: 无新改动需求，变更已完成
+SUMMARY: 说明 rm 需要确认，不能直接执行
 COMMANDS:
 - none
 FILES:
 - none
 RESPONSE:
-已完成该改动，无需再次确认。  
-如果你想进一步调整（如排除某些指令不回复“已收到”），告诉我具体规则即可。
+不能。`rm` 属于需要确认的命令，必须先确认才会执行。

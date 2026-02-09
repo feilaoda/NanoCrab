@@ -15,7 +15,7 @@ export type AgentRequest = {
   conversationId: string;
   userText: string;
   modelOverride?: string;
-  backendOverride?: "cli" | "sdk";
+  backendOverride?: "cli";
   contextMessages: Array<{ role: Role; content: string }>;
 };
 
