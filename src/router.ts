@@ -2,10 +2,19 @@ import os from "os";
 import path from "path";
 import { spawn } from "child_process";
 
-import { CODEX_BACKEND, DATA_DIR, MAX_CONTEXT_MESSAGES, PROJECT_ROOT, RESTART_CMD, SAFE_DIRS } from "./config.js";
+import {
+  CODEX_BACKEND,
+  DATA_DIR,
+  MAX_CONTEXT_MESSAGES,
+  PROJECT_ROOT,
+  RESTART_CMD,
+  RUNNER_ORIGIN,
+  SAFE_DIRS,
+} from "./config.js";
 import { resetCodexCliSession, resetCodexThread, runCodex } from "./codex/runner.js";
 import { logger } from "./logger.js";
-import { PluginManager } from "./plugins/manager.js";
+import { getSharedPluginManager } from "./plugins/manager.js";
+import { logConversationEvent, logRestartRequest } from "./runtime_log.js";
 import {
   addSafeDir,
   clearThreadIdForWorkspace,
@@ -26,6 +35,7 @@ import {
   getOrCreateConversation,
   getPendingApproval,
   getRecentMessages,
+  getRuntimeInfo,
   getSafeDirs,
   getThreadIdForWorkspace,
   getWorkspaceForCliSessionId,
@@ -48,19 +58,6 @@ import {
   setWorkspaceForThreadId,
   updateApprovalStatus,
 } from "./store/db.js";
-import {
-  addMarketSubscription,
-  listMarketSubscriptions,
-  logAudit,
-  removeMarketSubscription,
-} from "./store/market.js";
-import {
-  findMarketSymbolInText,
-  formatMarketQuote,
-  getMarketQuote,
-  isMarketIntent,
-  normalizeMarketSymbol,
-} from "./tools/market/service.js";
 import { AgentRequest, InboundMessage } from "./types.js";
 
 export interface RouterDeps {
@@ -93,15 +90,87 @@ const CODEX_ONLY_COMMANDS = new Set([
   "cancel",
   "restart",
 ]);
-let pluginManager: PluginManager | null = null;
 
-function getPluginManager(deps: RouterDeps): PluginManager {
-  if (!pluginManager) {
-    pluginManager = new PluginManager({ sendMessage: deps.sendMessage });
-  } else {
-    pluginManager.setHost({ sendMessage: deps.sendMessage });
+type CodexLogMeta = {
+  mode?: "proposal" | "execute";
+  kind?: "message" | "approval_prompt";
+  parsed?: boolean;
+  blocked?: boolean;
+  autoExecuted?: boolean;
+};
+type ApprovalContext = {
+  request: AgentRequest;
+  workspaceDir: string;
+};
+
+function logInboundMessage(
+  msg: InboundMessage,
+  conversationId: string,
+  plugin: string | null,
+  normalizedText: string,
+): void {
+  logConversationEvent({
+    type: "inbound",
+    role: "user",
+    chatId: msg.chatId,
+    conversationId,
+    senderId: msg.senderId,
+    senderName: msg.senderName,
+    isGroup: msg.isGroup,
+    isMentioned: msg.isMentioned,
+    plugin: plugin ?? null,
+    text: msg.text,
+    normalizedText: normalizedText !== msg.text ? normalizedText : undefined,
+    timestamp: msg.timestamp,
+  });
+}
+
+async function sendCodexReply(
+  deps: RouterDeps,
+  chatId: string,
+  conversationId: string,
+  text: string,
+  meta?: CodexLogMeta,
+  approvalCtx?: ApprovalContext,
+): Promise<void> {
+  const backend = (getConversationBackend(conversationId) || CODEX_BACKEND).toLowerCase();
+  if (approvalCtx) {
+    const inline = parseInlineApproval(text);
+    if (inline) {
+      const payload = JSON.stringify({ type: "codex", request: approvalCtx.request, workspaceDir: approvalCtx.workspaceDir });
+      const approvalId = `appr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      createApproval(approvalId, conversationId, payload);
+      const preface = inline.response ? `${inline.response}\n\n` : "";
+      const prompt = `${preface}需要确认后执行。\n摘要：${inline.summary || "准备执行更改"}\n回复“确认”继续，回复“取消”终止。`;
+      logConversationEvent({
+        type: "outbound",
+        role: "assistant",
+        source: "codex",
+        chatId,
+        conversationId,
+        backend,
+        text: prompt,
+        mode: meta?.mode,
+        kind: "approval_prompt",
+      });
+      await deps.sendMessage(chatId, prompt);
+      return;
+    }
   }
-  return pluginManager;
+  logConversationEvent({
+    type: "outbound",
+    role: "assistant",
+    source: "codex",
+    chatId,
+    conversationId,
+    backend,
+    text,
+    ...meta,
+  });
+  await deps.sendMessage(chatId, text);
+}
+function getPluginManager(deps: RouterDeps) {
+  return getSharedPluginManager({ sendMessage: deps.sendMessage });
 }
 
 export async function handleInbound(
@@ -110,7 +179,19 @@ export async function handleInbound(
 ): Promise<void> {
   const conversationId = getOrCreateConversation(msg.chatId, msg.isGroup);
   const plugin = getConversationPlugin(conversationId);
-  const normalizedText = normalizeContinue(msg.text);
+  let normalizedText = normalizeContinue(msg.text);
+  const preview = normalizedText.length > 200 ? `${normalizedText.slice(0, 200)}…` : normalizedText;
+  logger.info(
+    {
+      chatId: msg.chatId,
+      isGroup: msg.isGroup,
+      isMentioned: msg.isMentioned,
+      plugin: plugin ?? null,
+      text: preview,
+    },
+    "Inbound message",
+  );
+  logInboundMessage(msg, conversationId, plugin, normalizedText);
 
   const pending = getPendingApproval(conversationId);
   if (pending) {
@@ -150,19 +231,26 @@ export async function handleInbound(
     return;
   }
 
+  if (normalizedText.trim().toLowerCase() === "/confirm") {
+    normalizedText = "confirm";
+  }
+
   const command = parseCommand(normalizedText);
   if (command) {
+    await deps.sendMessage(msg.chatId, "已收到");
     await handleCommand(command, conversationId, plugin, deps, msg.chatId);
     return;
   }
 
-  const autoMarketHandled = await handleAutoMarketIntent(
+  const autoPluginHandled = await handleAutoPluginIntent(
     normalizedText,
     plugin,
     deps,
     msg.chatId,
+    conversationId,
+    msg.timestamp,
   );
-  if (autoMarketHandled) {
+  if (autoPluginHandled) {
     return;
   }
 
@@ -232,7 +320,13 @@ export async function handleInbound(
         const execResponse = await runCodex(request, workspaceDir, "execute");
         if (execResponse.type === "message") {
           saveMessage(conversationId, "assistant", execResponse.text);
-          await deps.sendMessage(msg.chatId, execResponse.text || "(无输出)");
+          await sendCodexReply(
+            deps,
+            msg.chatId,
+            conversationId,
+            execResponse.text || "(无输出)",
+            { mode: "execute", kind: "message" },
+          );
         }
         return;
       }
@@ -242,12 +336,22 @@ export async function handleInbound(
           const execResponse = await runCodex(request, workspaceDir, "execute");
           if (execResponse.type === "message") {
             saveMessage(conversationId, "assistant", execResponse.text);
-            await deps.sendMessage(msg.chatId, execResponse.text || "(无输出)");
+            await sendCodexReply(
+              deps,
+              msg.chatId,
+              conversationId,
+              execResponse.text || "(无输出)",
+              { mode: "execute", kind: "message" },
+              { request, workspaceDir },
+            );
           }
           return;
         }
         saveMessage(conversationId, "assistant", response.text);
-        await deps.sendMessage(msg.chatId, response.text);
+        await sendCodexReply(deps, msg.chatId, conversationId, response.text, {
+          mode: "proposal",
+          kind: "message",
+        }, { request, workspaceDir });
       }
       return;
     }
@@ -258,7 +362,13 @@ export async function handleInbound(
         const execResponse = await runCodex(request, workspaceDir, "execute");
         if (execResponse.type === "message") {
           saveMessage(conversationId, "assistant", execResponse.text);
-          await deps.sendMessage(msg.chatId, execResponse.text || "(无输出)");
+          await sendCodexReply(
+            deps,
+            msg.chatId,
+            conversationId,
+            execResponse.text || "(无输出)",
+            { mode: "execute", kind: "message" },
+          );
         }
         return;
       }
@@ -269,19 +379,38 @@ export async function handleInbound(
           const execResponse = await runCodex(request, workspaceDir, "execute");
           if (execResponse.type === "message") {
             saveMessage(conversationId, "assistant", execResponse.text);
-            await deps.sendMessage(msg.chatId, execResponse.text || "(无输出)");
+            await sendCodexReply(
+              deps,
+              msg.chatId,
+              conversationId,
+              execResponse.text || "(无输出)",
+              { mode: "execute", kind: "message" },
+              { request, workspaceDir },
+            );
           }
           return;
         }
         if (response.blocked || response.parsed === false) {
           saveMessage(conversationId, "assistant", response.text);
-          await deps.sendMessage(msg.chatId, response.text);
+          await sendCodexReply(deps, msg.chatId, conversationId, response.text, {
+            mode: "proposal",
+            kind: "message",
+            parsed: response.parsed,
+            blocked: response.blocked,
+          }, { request, workspaceDir });
           return;
         }
         const execResponse = await runCodex(request, workspaceDir, "execute");
         if (execResponse.type === "message") {
           saveMessage(conversationId, "assistant", execResponse.text);
-          await deps.sendMessage(msg.chatId, execResponse.text || "(无输出)");
+          await sendCodexReply(
+            deps,
+            msg.chatId,
+            conversationId,
+            execResponse.text || "(无输出)",
+            { mode: "execute", kind: "message" },
+            { request, workspaceDir },
+          );
         }
       }
       return;
@@ -293,9 +422,12 @@ export async function handleInbound(
       const payload = JSON.stringify({ type: "codex", request, workspaceDir });
       createApproval(response.approvalId, conversationId, payload);
       const preface = response.text ? `${response.text}\n\n` : "";
-      await deps.sendMessage(
+      await sendCodexReply(
+        deps,
         msg.chatId,
+        conversationId,
         `${preface}需要确认后执行。\n摘要：${response.summary}\n回复“确认”继续，回复“取消”终止。`,
+        { mode: "proposal", kind: "approval_prompt" },
       );
       return;
     }
@@ -307,19 +439,51 @@ export async function handleInbound(
         const approvalId = `appr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         createApproval(approvalId, conversationId, payload);
         const preface = inlineApproval.response ? `${inlineApproval.response}\n\n` : "";
-        await deps.sendMessage(
+        await sendCodexReply(
+          deps,
           msg.chatId,
+          conversationId,
           `${preface}需要确认后执行。\n摘要：${inlineApproval.summary || "准备执行更改"}\n回复“确认”继续，回复“取消”终止。`,
+          { mode: "proposal", kind: "approval_prompt" },
         );
         return;
       }
       saveMessage(conversationId, "assistant", response.text);
-      await deps.sendMessage(msg.chatId, response.text);
+      await sendCodexReply(deps, msg.chatId, conversationId, response.text, {
+        mode: "proposal",
+        kind: "message",
+      }, { request, workspaceDir });
     }
   } catch (err) {
     logger.error({ err }, "Codex run failed");
     await deps.sendMessage(msg.chatId, "执行失败，请稍后重试。");
   }
+}
+
+export async function handleInboundFast(
+  msg: InboundMessage,
+  deps: RouterDeps,
+): Promise<boolean> {
+  const normalizedText = normalizeContinue(msg.text);
+  const command = parseCommand(normalizedText);
+  if (!command) return false;
+
+  const fast = new Set([
+    "help",
+    "status",
+    "mode",
+    "backend",
+    "dir",
+    "cancel",
+    "restart",
+  ]);
+  if (!fast.has(command.name)) return false;
+
+  const conversationId = getOrCreateConversation(msg.chatId, msg.isGroup);
+  const plugin = getConversationPlugin(conversationId);
+  logInboundMessage(msg, conversationId, plugin, normalizedText);
+  await handleCommand(command, conversationId, plugin, deps, msg.chatId);
+  return true;
 }
 
 async function handleApprovalExecution(
@@ -353,7 +517,14 @@ async function handleApprovalExecution(
       const response = await runCodex(parsed.request, parsed.workspaceDir, "execute");
       if (response.type === "message") {
         saveMessage(conversationId, "assistant", response.text);
-        await deps.sendMessage(chatId, response.text || "(无输出)");
+        await sendCodexReply(
+          deps,
+          chatId,
+          conversationId,
+          response.text || "(无输出)",
+          { mode: "execute", kind: "message" },
+          { request: parsed.request, workspaceDir: parsed.workspaceDir },
+        );
       }
       return;
     }
@@ -419,13 +590,23 @@ async function handleConfirmLast(
       const execResponse = await runCodex(request, workspaceDir, "execute");
       if (execResponse.type === "message") {
         saveMessage(conversationId, "assistant", execResponse.text);
-        await deps.sendMessage(chatId, execResponse.text || "(无输出)");
+        await sendCodexReply(
+          deps,
+          chatId,
+          conversationId,
+          execResponse.text || "(无输出)",
+          { mode: "execute", kind: "message" },
+          { request, workspaceDir },
+        );
       }
       return;
     }
     if (response.text) {
       saveMessage(conversationId, "assistant", response.text);
-      await deps.sendMessage(chatId, response.text);
+      await sendCodexReply(deps, chatId, conversationId, response.text, {
+        mode: "proposal",
+        kind: "message",
+      }, { request, workspaceDir });
     }
   } catch (err) {
     logger.error({ err }, "Confirm last execution failed");
@@ -509,9 +690,12 @@ async function handleCommand(
   }
 
   switch (command.name) {
-    case "help":
-      await deps.sendMessage(chatId, buildHelpMessage(plugin));
+    case "help": {
+      const manager = getPluginManager(deps);
+      const pluginCommandLines = collectPluginCommandLines(manager);
+      await deps.sendMessage(chatId, buildHelpMessage(plugin, pluginCommandLines));
       return;
+    }
     case "cli":
       {
         const wantsWrite = command.args.includes("--write") || command.args.includes("write");
@@ -577,7 +761,18 @@ async function handleCommand(
         getConversationThreadId(conversationId) || getThreadIdForWorkspace(workspaceDir);
       const confirmNext = getConfirmNext(conversationId);
       const writeMode = getWriteMode(conversationId);
+      const runtimeInfo = getRuntimeInfo();
+      const runnerLabel =
+        RUNNER_ORIGIN === "codex"
+          ? "由 Codex 启动"
+          : RUNNER_ORIGIN === "shell" || RUNNER_ORIGIN === "local"
+            ? "由本机 Shell 启动"
+            : `由 ${RUNNER_ORIGIN} 启动`;
       const lines = [
+        `ChatId：${chatId}`,
+        `启动来源：${runnerLabel}`,
+        `PID：${runtimeInfo.pid ?? "(未知)"}`,
+        `启动时间：${runtimeInfo.startedAt ?? "(未知)"}`,
         `目录：${workspaceDir}`,
         `后端：${backendLabel}`,
         `CLI session：${cliSessionId || "(无)"}`,
@@ -589,9 +784,6 @@ async function handleCommand(
     }
     case "dir":
       await handleWorkspaceCommand(command.args, conversationId, deps, chatId);
-      return;
-    case "market":
-      await handleMarketCommand(command.args, deps, chatId);
       return;
     case "git":
       await handleGitCommand(command.args, conversationId, deps, chatId);
@@ -717,8 +909,17 @@ async function handleCommand(
     case "p":
       await handlePluginDirect(command.args, conversationId, deps, chatId);
       return;
-    default:
+    default: {
+      const handled = await handlePluginCommandByManifest(
+        command,
+        conversationId,
+        plugin,
+        deps,
+        chatId,
+      );
+      if (handled) return;
       await deps.sendMessage(chatId, "未知指令。输入 /help 查看可用命令。");
+    }
   }
 }
 
@@ -808,149 +1009,84 @@ async function handleWorkspaceCommand(
   await deps.sendMessage(chatId, "用法：/dir 或 /dir set <path>");
 }
 
-async function handleAutoMarketIntent(
+async function handleAutoPluginIntent(
   text: string,
   plugin: string | null,
   deps: RouterDeps,
   chatId: string,
+  conversationId: string,
+  timestamp?: string,
 ): Promise<boolean> {
   if (plugin && plugin !== "codex") return false;
-  const symbol = findMarketSymbolInText(text);
-  if (!symbol) return false;
-  if (!isMarketIntent(text) && text.trim() !== symbol) {
-    return false;
+  const manager = getPluginManager(deps);
+  const handlers = manager.getEventHandlers("message_received");
+  if (handlers.length === 0) return false;
+  const workspaceDir = resolveWorkspaceDir(conversationId);
+  for (const name of handlers) {
+    try {
+      const handled = await manager.handleEvent(
+        name,
+        "message_received",
+        { text, timestamp },
+        {
+          conversationId,
+          chatId,
+          workspaceDir,
+        },
+      );
+      if (handled === true) {
+        return true;
+      }
+    } catch (err) {
+      logger.warn({ err, plugin: name }, "plugin auto intent failed");
+    }
   }
-  logAudit(chatId, "market.auto", JSON.stringify({ symbol }));
-  try {
-    const quote = await getMarketQuote(symbol);
-    await deps.sendMessage(chatId, formatMarketQuote(quote));
-  } catch (err) {
-    await deps.sendMessage(chatId, `行情获取失败：${String(err)}`);
-  }
-  return true;
+  return false;
 }
 
-function normalizeMarketInterval(value: string): string | null {
-  const raw = value.trim().toLowerCase();
-  if (raw === "1" || raw === "1m") return "1m";
-  if (raw === "5" || raw === "5m") return "5m";
-  if (raw === "15" || raw === "15m") return "15m";
-  return null;
-}
-
-function parseMarketInterval(args: string[]): { value: string | null; provided: boolean } {
-  const idx = args.findIndex((item) => item === "--interval" || item === "-i");
-  if (idx >= 0) {
-    const value = args[idx + 1];
-    if (!value) return { value: null, provided: true };
-    return { value: normalizeMarketInterval(value), provided: true };
-  }
-
-  const direct = args.find((item) => normalizeMarketInterval(item) !== null);
-  if (direct) {
-    return { value: normalizeMarketInterval(direct), provided: true };
-  }
-  return { value: null, provided: false };
-}
-
-async function handleMarketCommand(
-  args: string[],
+async function handlePluginCommandByManifest(
+  command: { name: string; args: string[] },
+  conversationId: string,
+  plugin: string | null,
   deps: RouterDeps,
   chatId: string,
-): Promise<void> {
-  const sub = (args[0] || "help").toLowerCase();
+): Promise<boolean> {
+  const manager = getPluginManager(deps);
+  const handlers = manager.getCommandHandlers(command.name);
+  if (handlers.length === 0) return false;
 
-  if (sub === "quote") {
-    const symbol = args[1];
-    if (!symbol) {
-      await deps.sendMessage(chatId, "用法：/market quote <symbol>");
-      return;
-    }
-    const normalized = normalizeMarketSymbol(symbol);
-    logAudit(chatId, "market.quote", JSON.stringify({ symbol: normalized }));
-    try {
-      const quote = await getMarketQuote(normalized);
-      await deps.sendMessage(chatId, formatMarketQuote(quote));
-    } catch (err) {
-      await deps.sendMessage(chatId, `行情获取失败：${String(err)}`);
-    }
-    return;
+  if (handlers.length > 1) {
+    await deps.sendMessage(
+      chatId,
+      `命令 /${command.name} 存在冲突（多个插件声明）：${handlers.join(", ")}。请调整插件声明。`,
+    );
+    return true;
   }
 
-  if (sub === "watch") {
-    const action = (args[1] || "list").toLowerCase();
-    if (action === "list") {
-      const subs = listMarketSubscriptions(chatId);
-      if (subs.length === 0) {
-        await deps.sendMessage(chatId, "暂无订阅。用法：/market watch add <symbol> --interval 5m");
-        return;
-      }
-      const lines = subs.map((subItem) => `- ${subItem.symbol} (${subItem.interval})`);
-      await deps.sendMessage(chatId, `当前订阅：\n${lines.join("\n")}`);
-      return;
-    }
+  const target = handlers[0];
 
-    if (action === "add") {
-      const symbol = args[2];
-      if (!symbol) {
-        await deps.sendMessage(chatId, "用法：/market watch add <symbol> --interval 5m");
-        return;
-      }
-      const parsedInterval = parseMarketInterval(args.slice(3));
-      if (parsedInterval.provided && !parsedInterval.value) {
-        await deps.sendMessage(chatId, "仅支持间隔：1m / 5m / 15m");
-        return;
-      }
-      const interval = parsedInterval.value ?? "5m";
-      const normalized = normalizeMarketSymbol(symbol);
-      if (!normalized) {
-        await deps.sendMessage(chatId, "请输入有效的标的代码。");
-        return;
-      }
-      const result = addMarketSubscription(chatId, normalized, interval);
-      logAudit(chatId, "market.watch.add", JSON.stringify({ symbol: normalized, interval }));
-      const note = result.created ? "已添加订阅" : "已更新订阅";
-      await deps.sendMessage(chatId, `${note}：${normalized}（${interval}）`);
-      return;
-    }
-
-    if (action === "remove") {
-      const symbol = args[2];
-      if (!symbol) {
-        await deps.sendMessage(chatId, "用法：/market watch remove <symbol> [--interval 5m]");
-        return;
-      }
-      const parsedInterval = parseMarketInterval(args.slice(3));
-      if (parsedInterval.provided && !parsedInterval.value) {
-        await deps.sendMessage(chatId, "仅支持间隔：1m / 5m / 15m");
-        return;
-      }
-      const interval = parsedInterval.value ?? undefined;
-      const normalized = normalizeMarketSymbol(symbol);
-      const removed = removeMarketSubscription(chatId, normalized, interval);
-      logAudit(chatId, "market.watch.remove", JSON.stringify({ symbol: normalized, interval }));
-      if (removed === 0) {
-        await deps.sendMessage(chatId, "未找到对应订阅。");
-        return;
-      }
-      const suffix = interval ? `（${interval}）` : "";
-      await deps.sendMessage(chatId, `已移除订阅：${normalized}${suffix}`);
-      return;
-    }
-
-    await deps.sendMessage(chatId, "用法：/market watch add|list|remove ...");
-    return;
+  if (!manager.isInstalled(target) || !manager.isEnabled(target)) {
+    await deps.sendMessage(chatId, `插件 ${target} 未安装或已禁用。`);
+    return true;
   }
 
-  if (sub === "list") {
-    await handleMarketCommand(["watch", "list"], deps, chatId);
-    return;
+  const workspaceDir = resolveWorkspaceDir(conversationId);
+  try {
+    await manager.handleCommand(
+      target,
+      command.name,
+      command.args,
+      {
+        conversationId,
+        chatId,
+        workspaceDir,
+      },
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await deps.sendMessage(chatId, `插件 ${target} 执行失败：${message}`);
   }
-
-  await deps.sendMessage(
-    chatId,
-    "用法：/market quote <symbol> | /market watch add <symbol> --interval 5m | /market watch list | /market watch remove <symbol> [--interval 5m]",
-  );
+  return true;
 }
 
 async function handleGitCommand(
@@ -1064,6 +1200,7 @@ async function handleRestartCommand(
 ): Promise<void> {
   try {
     setRestartNotifyChatId(chatId);
+    logRestartRequest(chatId, process.pid);
     const { cmd, args } = splitCommand(RESTART_CMD);
     const child = spawn(cmd, args, {
       cwd: PROJECT_ROOT,
@@ -1166,15 +1303,36 @@ function formatLastExchange(messages: Array<{ role: "user" | "assistant"; conten
   return `最近一次对话：\n用户：${userText}\n助手：${assistantText}`;
 }
 
-function buildHelpMessage(plugin: string | null): string {
+function collectPluginCommandLines(
+  manager: ReturnType<typeof getPluginManager>,
+): string[] {
+  const items: Array<{ name: string; commands: string[] }> = [];
+  for (const entry of manager.list()) {
+    if (!entry.enabled) continue;
+    const manifest = manager.getManifest(entry.name);
+    const raw = manifest?.commands ?? [];
+    const commands = Array.from(
+      new Set(raw.map((cmd) => cmd.trim()).filter((cmd) => cmd)),
+    ).sort();
+    if (commands.length === 0) continue;
+    items.push({ name: entry.name, commands });
+  }
+  items.sort((a, b) => a.name.localeCompare(b.name));
+  return items.map(
+    (item) => `- ${item.name}: ${item.commands.map((cmd) => `/${cmd}`).join(" ")}`,
+  );
+}
+
+function buildHelpMessage(plugin: string | null, pluginCommandLines: string[]): string {
   const lines = ["可用指令：", "/help", "/exit"];
+  const pluginHint = "插件命令：/p <name> <cmd>（或直接 /<cmd>，需插件声明）";
+  const pluginCommands =
+    pluginCommandLines.length > 0
+      ? ["插件命令（已启用）：", ...pluginCommandLines]
+      : [];
   if (!plugin) {
     lines.push(
       "/codex",
-      "/market quote <symbol>",
-      "/market watch add <symbol> --interval 5m",
-      "/market watch list",
-      "/market watch remove <symbol> [--interval 5m]",
       "/plugin list",
       "/plugin info <name>",
       "/plugin install <path>",
@@ -1185,6 +1343,8 @@ function buildHelpMessage(plugin: string | null): string {
       "/plugin sandbox <name> on|off",
       "/plugin use <name>",
       "/p <name> <cmd>",
+      pluginHint,
+      ...pluginCommands,
     );
     return lines.join("\n");
   }
@@ -1192,10 +1352,6 @@ function buildHelpMessage(plugin: string | null): string {
   if (plugin === "codex") {
     lines.push(
       "/codex",
-      "/market quote <symbol>",
-      "/market watch add <symbol> --interval 5m",
-      "/market watch list",
-      "/market watch remove <symbol> [--interval 5m]",
       "/reset",
       "/model",
       "/model set <name>",
@@ -1227,16 +1383,14 @@ function buildHelpMessage(plugin: string | null): string {
       "/plugin sandbox <name> on|off",
       "/plugin use <name>",
       "/p <name> <cmd>",
+      pluginHint,
+      ...pluginCommands,
     );
     return lines.join("\n");
   }
 
   lines.push(
     "/codex",
-    "/market quote <symbol>",
-    "/market watch add <symbol> --interval 5m",
-    "/market watch list",
-    "/market watch remove <symbol> [--interval 5m]",
     "/plugin list",
     "/plugin info <name>",
     "/plugin install <path>",
@@ -1247,6 +1401,8 @@ function buildHelpMessage(plugin: string | null): string {
     "/plugin runtime <name> isolate|embed",
     "/plugin sandbox <name> on|off",
     "/p <name> <cmd>",
+    pluginHint,
+    ...pluginCommands,
   );
   return lines.join("\n");
 }
@@ -1296,6 +1452,13 @@ async function handlePluginCommand(
         `内嵌审批：${entry.approvedEmbed ? "yes" : "no"}`,
         `sandbox-off 审批：${entry.approvedSandboxOff ? "yes" : "no"}`,
       ];
+      const manifest = manager.getManifest(name);
+      if (manifest?.commands?.length) {
+        lines.push(`命令：${manifest.commands.join(", ")}`);
+      }
+      if (manifest?.events?.length) {
+        lines.push(`事件：${manifest.events.join(", ")}`);
+      }
       await deps.sendMessage(chatId, lines.join("\n"));
       return;
     }

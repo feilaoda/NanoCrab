@@ -24,11 +24,11 @@ export class IsolateRuntime {
     host: HostDeps,
   ) {
     this.host = host;
-    const ext = import.meta.url.endsWith(".ts") ? "ts" : "js";
-    const workerUrl = new URL(`./isolate_worker.${ext}`, import.meta.url);
+    const workerUrl = new URL("./isolate_worker.js", import.meta.url);
     this.worker = new Worker(workerUrl, {
       workerData: { pluginPath: this.pluginPath, manifest: this.manifest },
-      execArgv: process.execArgv,
+      execArgv: buildWorkerExecArgv(true),
+      type: "module",
     });
     this.worker.on("message", (msg: RuntimeResponse | { type: string; payload: unknown }) => {
       if (msg && typeof msg === "object" && "type" in msg) {
@@ -84,12 +84,12 @@ export class IsolateRuntime {
     await this.worker.terminate();
   }
 
-  async onEvent(event: string, payload: unknown, context: PluginContext): Promise<void> {
-    await this.request("onEvent", { event, payload, context });
+  async onEvent(event: string, payload: unknown, context: PluginContext): Promise<unknown> {
+    return this.request("onEvent", { event, payload, context });
   }
 
-  async onCommand(command: string, args: string[], context: PluginContext): Promise<void> {
-    await this.request("onCommand", { command, args, context });
+  async onCommand(command: string, args: string[], context: PluginContext): Promise<unknown> {
+    return this.request("onCommand", { command, args, context });
   }
 
   private request(type: RuntimeRequest["type"], payload: Record<string, unknown>): Promise<unknown> {
@@ -100,4 +100,59 @@ export class IsolateRuntime {
       this.worker.postMessage(msg);
     });
   }
+}
+
+function buildWorkerExecArgv(needsTsLoader: boolean): string[] {
+  let execArgv = [...process.execArgv];
+  if (!needsTsLoader) return execArgv;
+  execArgv = stripDeprecatedTsxLoader(execArgv);
+  if (!hasTsxImport(execArgv)) {
+    execArgv.push("--import", "tsx");
+  }
+  return execArgv;
+}
+
+function stripDeprecatedTsxLoader(execArgv: string[]): string[] {
+  const filtered: string[] = [];
+  for (let i = 0; i < execArgv.length; i += 1) {
+    const arg = execArgv[i];
+    if (arg === "--loader" || arg === "--experimental-loader") {
+      const value = execArgv[i + 1];
+      if (value && value.includes("tsx")) {
+        i += 1;
+        continue;
+      }
+      filtered.push(arg);
+      if (value !== undefined) {
+        filtered.push(value);
+        i += 1;
+      }
+      continue;
+    }
+    if (arg.startsWith("--loader=") || arg.startsWith("--experimental-loader=")) {
+      const value = arg.split("=", 2)[1] || "";
+      if (value.includes("tsx")) {
+        continue;
+      }
+      filtered.push(arg);
+      continue;
+    }
+    filtered.push(arg);
+  }
+  return filtered;
+}
+
+function hasTsxImport(execArgv: string[]): boolean {
+  for (let i = 0; i < execArgv.length; i += 1) {
+    const arg = execArgv[i];
+    if (arg === "--import") {
+      const value = execArgv[i + 1] || "";
+      if (value.includes("tsx")) return true;
+    }
+    if (arg.startsWith("--import=")) {
+      const value = arg.split("=", 2)[1] || "";
+      if (value.includes("tsx")) return true;
+    }
+  }
+  return false;
 }

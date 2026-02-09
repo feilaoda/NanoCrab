@@ -70,14 +70,20 @@ async function runCodexSdk(
   workspaceDir?: string,
   options?: { allowAutoExecute?: boolean },
 ): Promise<AgentResponse> {
-  const thread = await getOrCreateThread(request.conversationId, workspaceDir);
+  const timeoutLabel = `Codex SDK timed out after ${CODEX_TIMEOUT_MS}ms`;
+  const thread = await withTimeout(
+    getOrCreateThread(request.conversationId, workspaceDir),
+    CODEX_TIMEOUT_MS,
+    timeoutLabel,
+  );
   const prompt = buildPrompt(request, mode);
-  const result = request.modelOverride
-    ? await (thread as unknown as { run: (p: string, o?: { model?: string }) => Promise<any> }).run(
+  const runPromise = request.modelOverride
+    ? (thread as unknown as { run: (p: string, o?: { model?: string }) => Promise<any> }).run(
         prompt,
         { model: request.modelOverride },
       )
-    : await thread.run(prompt);
+    : thread.run(prompt);
+  const result = await withTimeout(runPromise, CODEX_TIMEOUT_MS, timeoutLabel);
   const output = extractSdkOutput(result);
   if (!output) {
     logger.warn({ backend: "sdk", mode, result }, "Codex SDK output empty");
@@ -122,6 +128,23 @@ async function runCodexSdk(
     approvalId: parsed.approvalId,
     summary: parsed.summary || "准备执行更改",
   };
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(label));
+    }, ms);
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
 }
 
 function getSdkClient(): Codex {

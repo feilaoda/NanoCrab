@@ -22,6 +22,7 @@ function respond(id: string, ok: boolean, result?: unknown, error?: string): voi
 
 function buildContext(base: PluginContext): PluginContext & {
   sendMessage: (text: string) => void;
+  sendMessageTo: (chatId: string, text: string) => void;
   log: (level: string, message: string, data?: unknown) => void;
 } {
   return {
@@ -30,6 +31,12 @@ function buildContext(base: PluginContext): PluginContext & {
       parentPort?.postMessage({
         type: "host:sendMessage",
         payload: { chatId: base.chatId, text },
+      });
+    },
+    sendMessageTo: (chatId: string, text: string) => {
+      parentPort?.postMessage({
+        type: "host:sendMessage",
+        payload: { chatId, text },
       });
     },
     log: (level: string, message: string, data?: unknown) => {
@@ -76,23 +83,23 @@ async function handleRequest(msg: RuntimeRequest): Promise<void> {
 
     if (type === "onEvent" && typeof pluginModule?.onEvent === "function") {
       const ctx = buildContext(payload.context as PluginContext);
-      await (pluginModule.onEvent as (
+      const result = await (pluginModule.onEvent as (
         event: string,
         eventPayload: unknown,
         ctx: PluginContext,
       ) => Promise<unknown> | unknown)(payload.event as string, payload.payload, ctx);
-      respond(id, true);
+      respond(id, true, result);
       return;
     }
 
     if (type === "onCommand" && typeof pluginModule?.onCommand === "function") {
       const ctx = buildContext(payload.context as PluginContext);
-      await (pluginModule.onCommand as (
+      const result = await (pluginModule.onCommand as (
         cmd: string,
         args: string[],
         ctx: PluginContext,
       ) => Promise<unknown> | unknown)(payload.command as string, payload.args as string[], ctx);
-      respond(id, true);
+      respond(id, true, result);
       return;
     }
 

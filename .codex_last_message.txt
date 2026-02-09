@@ -1,8 +1,9 @@
-目前还不是“插件化”的，现状是：行情能力作为内置模块（`src/tools/market/*` + `src/router.ts` 路由与自动识别）直接挂在核心里，并没有走统一的插件注册/生命周期接口。
-
-如果你要“真正做成插件”，我可以按你现有框架落地成：
-- `plugins/market/` 独立目录
-- 插件注册（capabilities/commands/intent hooks）
-- 核心只负责加载与路由，行情逻辑完全下沉到插件
-
-你希望我把 market 重构成插件吗？如果是，你已有插件机制/接口吗，还是我先给你一个最小插件框架再迁移？
+NEEDS_APPROVAL: no
+SUMMARY: 无新改动需求，变更已完成
+COMMANDS:
+- none
+FILES:
+- none
+RESPONSE:
+已完成该改动，无需再次确认。  
+如果你想进一步调整（如排除某些指令不回复“已收到”），告诉我具体规则即可。

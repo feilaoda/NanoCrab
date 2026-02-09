@@ -2,10 +2,17 @@ import { FEISHU_BOT_NAME, FEISHU_BOT_OPEN_ID, FEISHU_RTM_ENABLED } from "./confi
 import { sendFeishuMessage } from "./feishu/api.js";
 import { FeishuRtmClient } from "./feishu/rtm.js";
 import { logger } from "./logger.js";
-import { handleInbound } from "./router.js";
-import { startMarketScheduler } from "./scheduler/market.js";
-import { clearRestartNotifyChatId, getRestartNotifyChatId, initDatabase } from "./store/db.js";
+import { handleInbound, handleInboundFast } from "./router.js";
+import { getSharedPluginManager } from "./plugins/manager.js";
+import { startHttpApi } from "./http_api.js";
+import {
+  clearRestartNotifyChatId,
+  getRestartNotifyChatId,
+  initDatabase,
+  setRuntimeInfo,
+} from "./store/db.js";
 import { InboundMessage } from "./types.js";
+import { logRuntimeStart } from "./runtime_log.js";
 
 class PerChatQueue {
   private queues = new Map<string, InboundMessage[]>();
@@ -49,8 +56,12 @@ class PerChatQueue {
 async function main(): Promise<void> {
   initDatabase();
   logger.info("Database initialized");
-
-  startMarketScheduler(sendFeishuMessage);
+  const startedAt = new Date().toISOString();
+  setRuntimeInfo(process.pid, startedAt);
+  logRuntimeStart(process.pid, startedAt);
+  startHttpApi();
+  const pluginManager = getSharedPluginManager({ sendMessage: sendFeishuMessage });
+  void pluginManager.loadEnabled();
 
   if (!FEISHU_RTM_ENABLED) {
     logger.error("FEISHU_RTM_ENABLED is false; nothing to run.");
@@ -69,7 +80,10 @@ async function main(): Promise<void> {
   });
 
   rtm.on("message", (msg: InboundMessage) => {
-    queue.enqueue(msg);
+    void handleInboundFast(msg, { sendMessage: sendFeishuMessage }).then((handled) => {
+      if (handled) return;
+      queue.enqueue(msg);
+    });
   });
 
   rtm.on("connected", () => {

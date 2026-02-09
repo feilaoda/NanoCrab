@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 
-import { DATA_DIR, PLUGINS_DIR } from "../config.js";
+import { DATA_DIR, PLUGINS_DIR, PROJECT_ROOT } from "../config.js";
 import { logger } from "../logger.js";
 import { EmbedRuntime } from "./embed_runtime.js";
 import { IsolateRuntime } from "./isolate_runtime.js";
@@ -15,9 +15,22 @@ import {
   PluginRuntimeInfo,
 } from "./types.js";
 
-type HostDeps = {
+export type PluginHostDeps = {
   sendMessage: (chatId: string, text: string) => Promise<void>;
 };
+
+const BUILTIN_PLUGIN_DIRS = [path.join(PROJECT_ROOT, "plugins", "market")];
+
+let sharedManager: PluginManager | null = null;
+
+export function getSharedPluginManager(host: PluginHostDeps): PluginManager {
+  if (!sharedManager) {
+    sharedManager = new PluginManager(host);
+  } else {
+    sharedManager.setHost(host);
+  }
+  return sharedManager;
+}
 
 type RuntimeHandle = {
   runtime: EmbedRuntime | IsolateRuntime;
@@ -30,15 +43,17 @@ type RuntimeHandle = {
 export class PluginManager {
   private registry: PluginRegistry;
   private runtimes = new Map<string, RuntimeHandle>();
-  private host: HostDeps;
+  private manifestCache = new Map<string, { path: string; manifest: PluginManifest }>();
+  private host: PluginHostDeps;
 
-  constructor(host: HostDeps) {
+  constructor(host: PluginHostDeps) {
     this.host = host;
     ensureRegistryFile();
     this.registry = loadRegistry();
+    this.registerBuiltinPlugins();
   }
 
-  setHost(host: HostDeps): void {
+  setHost(host: PluginHostDeps): void {
     this.host = host;
     for (const handle of this.runtimes.values()) {
       handle.runtime.setHost(host);
@@ -67,6 +82,42 @@ export class PluginManager {
       .map((entry) => entry.name);
   }
 
+  getManifest(name: string): PluginManifest | null {
+    const entry = this.registry[name];
+    if (!entry) return null;
+    return this.getManifestFor(entry);
+  }
+
+  getCommandHandlers(command: string): string[] {
+    const needle = command.toLowerCase();
+    const handlers: string[] = [];
+    for (const entry of Object.values(this.registry)) {
+      if (!entry.enabled) continue;
+      const manifest = this.getManifestFor(entry);
+      const commands = manifest?.commands;
+      if (!commands || commands.length === 0) continue;
+      if (commands.some((cmd) => cmd.toLowerCase() === needle)) {
+        handlers.push(entry.name);
+      }
+    }
+    return handlers;
+  }
+
+  getEventHandlers(event: string): string[] {
+    const needle = event.toLowerCase();
+    const handlers: string[] = [];
+    for (const entry of Object.values(this.registry)) {
+      if (!entry.enabled) continue;
+      const manifest = this.getManifestFor(entry);
+      const events = manifest?.events;
+      if (!events || events.length === 0) continue;
+      if (events.some((evt) => evt.toLowerCase() === needle)) {
+        handlers.push(entry.name);
+      }
+    }
+    return handlers;
+  }
+
   async installFromPath(sourcePath: string): Promise<PluginRegistryEntry> {
     const manifest = readManifest(sourcePath);
     const destPath = path.join(PLUGINS_DIR, manifest.name, manifest.version);
@@ -90,6 +141,7 @@ export class PluginManager {
     };
 
     this.registry[manifest.name] = entry;
+    this.manifestCache.set(manifest.name, { path: destPath, manifest });
     saveRegistry(this.registry);
     await this.load(manifest.name);
     return entry;
@@ -100,8 +152,12 @@ export class PluginManager {
     if (!entry) {
       throw new Error(`插件 ${name} 未安装`);
     }
+    if (entry.builtin) {
+      throw new Error("内置插件不可卸载");
+    }
     await this.unload(name);
     delete this.registry[name];
+    this.manifestCache.delete(name);
     saveRegistry(this.registry);
     fs.rmSync(entry.path, { recursive: true, force: true });
   }
@@ -158,11 +214,11 @@ export class PluginManager {
     event: string,
     payload: unknown,
     context: Omit<PluginContext, "runtime" | "permissions" | "pluginName">,
-  ): Promise<void> {
+  ): Promise<unknown> {
     const handle = await this.ensureRuntime(name);
-    if (!handle) return;
+    if (!handle) return undefined;
     const fullContext = buildContext(name, context, handle.runtimeInfo, handle.permissions);
-    await handle.runtime.onEvent(event, payload, fullContext);
+    return handle.runtime.onEvent(event, payload, fullContext);
   }
 
   async handleCommand(
@@ -170,11 +226,11 @@ export class PluginManager {
     command: string,
     args: string[],
     context: Omit<PluginContext, "runtime" | "permissions" | "pluginName">,
-  ): Promise<void> {
+  ): Promise<unknown> {
     const handle = await this.ensureRuntime(name);
-    if (!handle) return;
+    if (!handle) return undefined;
     const fullContext = buildContext(name, context, handle.runtimeInfo, handle.permissions);
-    await handle.runtime.onCommand(command, args, fullContext);
+    return handle.runtime.onCommand(command, args, fullContext);
   }
 
   approveEmbed(name: string): void {
@@ -226,6 +282,22 @@ export class PluginManager {
     await this.load(name);
   }
 
+  private getManifestFor(entry: PluginRegistryEntry): PluginManifest | null {
+    const cached = this.manifestCache.get(entry.name);
+    if (cached && cached.path === entry.path) {
+      return cached.manifest;
+    }
+    try {
+      const manifest = readManifest(entry.path);
+      this.manifestCache.set(entry.name, { path: entry.path, manifest });
+      return manifest;
+    } catch (err) {
+      logger.warn({ err, plugin: entry.name }, "Plugin manifest load failed");
+      this.manifestCache.delete(entry.name);
+      return null;
+    }
+  }
+
   private async ensureRuntime(name: string): Promise<RuntimeHandle | null> {
     const entry = this.registry[name];
     if (!entry || !entry.enabled) return null;
@@ -260,6 +332,52 @@ export class PluginManager {
         ? new EmbedRuntime(entry.path, manifest, this.host)
         : new IsolateRuntime(entry.path, manifest, this.host);
     return { runtime, manifest, entry, runtimeInfo, permissions };
+  }
+
+  async loadEnabled(): Promise<void> {
+    for (const name of this.getEnabledNames()) {
+      await this.load(name);
+    }
+  }
+
+  private registerBuiltinPlugins(): void {
+    let changed = false;
+    for (const pluginPath of BUILTIN_PLUGIN_DIRS) {
+      if (!fs.existsSync(pluginPath)) {
+        logger.warn({ pluginPath }, "Builtin plugin path missing");
+        continue;
+      }
+      let manifest: PluginManifest;
+      try {
+        manifest = readManifest(pluginPath);
+      } catch (err) {
+        logger.warn({ err, pluginPath }, "Builtin plugin manifest invalid");
+        continue;
+      }
+      if (this.registry[manifest.name]) {
+        continue;
+      }
+      this.manifestCache.set(manifest.name, { path: pluginPath, manifest });
+      const entry: PluginRegistryEntry = {
+        name: manifest.name,
+        version: manifest.version,
+        path: pluginPath,
+        enabled: true,
+        builtin: true,
+        approvedEmbed: false,
+        approvedSandboxOff: false,
+        runtime: {
+          mode: "isolate",
+          sandbox: manifest.runtime?.sandbox === "off" ? "off" : "on",
+        },
+        installedAt: new Date().toISOString(),
+      };
+      this.registry[manifest.name] = entry;
+      changed = true;
+    }
+    if (changed) {
+      saveRegistry(this.registry);
+    }
   }
 }
 

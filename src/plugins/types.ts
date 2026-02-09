@@ -45,6 +45,7 @@ export interface PluginRegistryEntry {
   version: string;
   path: string;
   enabled: boolean;
+  builtin?: boolean;
   approvedEmbed: boolean;
   approvedSandboxOff?: boolean;
   runtime: {
@@ -64,6 +65,7 @@ export interface PluginContext {
   runtime: PluginRuntimeInfo;
   permissions: PluginPermissions;
   sendMessage?: (text: string) => void;
+  sendMessageTo?: (chatId: string, text: string) => void;
   log?: (level: string, message: string, data?: unknown) => void;
 }
 

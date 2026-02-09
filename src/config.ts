@@ -5,10 +5,14 @@ import path from "path";
 export const PROJECT_ROOT = process.cwd();
 export const DATA_DIR = path.join(PROJECT_ROOT, "data");
 export const STORE_DIR = path.join(PROJECT_ROOT, "store");
+export const LOG_DIR = path.join(PROJECT_ROOT, "logs");
+export const RESTART_LOG_PATH = path.join(LOG_DIR, "restart.log");
 export const PLUGINS_DIR = path.join(DATA_DIR, "plugins");
 export const PLUGIN_REGISTRY_PATH = path.join(STORE_DIR, "plugins.json");
 
 export const LOG_LEVEL = process.env.LOG_LEVEL || "info";
+const rawRunner = (process.env.NANOCRAB_RUNNER || "").trim().toLowerCase();
+export const RUNNER_ORIGIN = rawRunner || "local";
 
 export const FEISHU_API_BASE = (process.env.FEISHU_API_BASE || "https://open.feishu.cn")
   .replace(/\/$/, "");
@@ -52,6 +56,12 @@ export const MARKET_REQUEST_GAP_MS = Number(process.env.MARKET_REQUEST_GAP_MS ||
 export const MARKET_CACHE_TTL_MS = Number(process.env.MARKET_CACHE_TTL_MS || 55000);
 
 export const DEFAULT_LANGUAGE = process.env.DEFAULT_LANGUAGE || "zh";
+export const HTTP_API_ENABLED = !["false", "0", "no"].includes(
+  (process.env.HTTP_API_ENABLED || "true").toLowerCase(),
+);
+export const HTTP_API_HOST = process.env.HTTP_API_HOST || "127.0.0.1";
+export const HTTP_API_PORT = Number(process.env.HTTP_API_PORT || 8787);
+export const HTTP_API_TOKEN = process.env.HTTP_API_TOKEN || "";
 
 function parseList(raw: string): string[] {
   return raw

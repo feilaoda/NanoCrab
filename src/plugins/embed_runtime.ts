@@ -45,14 +45,14 @@ export class EmbedRuntime {
     this.pluginModule = null;
   }
 
-  async onEvent(event: string, payload: unknown, context: PluginContext): Promise<void> {
-    if (!this.pluginModule?.onEvent) return;
-    await this.pluginModule.onEvent(event, payload, this.buildContext(context));
+  async onEvent(event: string, payload: unknown, context: PluginContext): Promise<unknown> {
+    if (!this.pluginModule?.onEvent) return undefined;
+    return this.pluginModule.onEvent(event, payload, this.buildContext(context));
   }
 
-  async onCommand(command: string, args: string[], context: PluginContext): Promise<void> {
-    if (!this.pluginModule?.onCommand) return;
-    await this.pluginModule.onCommand(command, args, this.buildContext(context));
+  async onCommand(command: string, args: string[], context: PluginContext): Promise<unknown> {
+    if (!this.pluginModule?.onCommand) return undefined;
+    return this.pluginModule.onCommand(command, args, this.buildContext(context));
   }
 
   private async loadPlugin(): Promise<void> {
@@ -75,6 +75,10 @@ export class EmbedRuntime {
       sendMessage: (text: string) => {
         if (!base.chatId) return;
         void this.host.sendMessage(base.chatId, text);
+      },
+      sendMessageTo: (chatId: string, text: string) => {
+        if (!chatId) return;
+        void this.host.sendMessage(chatId, text);
       },
       log: (level: string, message: string, data?: unknown) => {
         if (level === "error") {

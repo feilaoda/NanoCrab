@@ -71,7 +71,7 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - `/cli [--write|--safe]` (switch to Codex CLI backend; `--write` auto-executes, `--safe` exits write mode)
 - `/backend` (show current backend)
 - `/mode` (show execution mode)
-- `/status` (show current directory and session/thread ids)
+- `/status` (show current directory, session/thread ids, and runner origin)
 - `/dir` (show current workspace dir)
 - `/dir set <path>` (bind workspace dir)
 - `/confirm` (approve pending execution)
@@ -98,6 +98,24 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - Group chats require @ mention to trigger.
 - Private chats always trigger.
 - Text messages only (MVP).
+- Runner origin in `/status` comes from `NANOCRAB_RUNNER`:
+  - `NANOCRAB_RUNNER=codex` -> 由 Codex 启动
+  - `NANOCRAB_RUNNER=shell` -> 由本机 Shell 启动
+  - unset -> 默认显示为“由本机 Shell 启动”
+
+## HTTP API (local push)
+Optional HTTP API to push messages to Feishu:
+
+```
+HTTP_API_ENABLED=true
+HTTP_API_HOST=127.0.0.1
+HTTP_API_PORT=8787
+HTTP_API_TOKEN=your_token_here
+```
+
+Endpoints:
+- `GET /health`
+- `POST /api/push` body: `{"chatId":"oc_xxx","text":"hello"}` with `Authorization: Bearer <token>`
 - If you don't set `/model`, Codex CLI will use its default from `~/.codex/config.toml`.
 - Set `CODEX_BACKEND=sdk` to use the Codex SDK thread-based backend.
 - By default, you must enter `/codex` to start using Codex.

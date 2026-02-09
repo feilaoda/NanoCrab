@@ -1,0 +1,16 @@
+{
+  "name": "market",
+  "version": "0.1.0",
+  "main": "index.js",
+  "displayName": "Market",
+  "description": "Market quotes and subscriptions",
+  "commands": ["market", "quote", "watch"],
+  "events": ["message_received"],
+  "permissions": {
+    "net": true
+  },
+  "runtime": {
+    "mode": "isolate",
+    "sandbox": "on"
+  }
+}
