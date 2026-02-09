@@ -3,7 +3,7 @@ import { sendFeishuMessage } from "./feishu/api.js";
 import { FeishuRtmClient } from "./feishu/rtm.js";
 import { logger } from "./logger.js";
 import { handleInbound } from "./router.js";
-import { initDatabase } from "./store/db.js";
+import { clearRestartNotifyChatId, getRestartNotifyChatId, initDatabase } from "./store/db.js";
 import { InboundMessage } from "./types.js";
 
 class PerChatQueue {
@@ -71,9 +71,21 @@ async function main(): Promise<void> {
 
   rtm.on("connected", () => {
     logger.info("Feishu RTM ready");
+    void notifyRestart();
   });
 
   await rtm.connect();
+}
+
+async function notifyRestart(): Promise<void> {
+  const chatId = getRestartNotifyChatId();
+  if (!chatId) return;
+  try {
+    await sendFeishuMessage(chatId, "服务已重启。");
+    clearRestartNotifyChatId();
+  } catch (err) {
+    logger.warn({ err }, "Failed to send restart notification");
+  }
 }
 
 main().catch((err) => {

@@ -5,6 +5,8 @@ import path from "path";
 export const PROJECT_ROOT = process.cwd();
 export const DATA_DIR = path.join(PROJECT_ROOT, "data");
 export const STORE_DIR = path.join(PROJECT_ROOT, "store");
+export const PLUGINS_DIR = path.join(DATA_DIR, "plugins");
+export const PLUGIN_REGISTRY_PATH = path.join(STORE_DIR, "plugins.json");
 
 export const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 
@@ -22,6 +24,7 @@ export const FEISHU_RTM_ENABLED = !["false", "0", "no"].includes(
 export const FEISHU_RTM_CONNECT_PATH =
   process.env.FEISHU_RTM_CONNECT_PATH || "/open-apis/rtm/v1/connect";
 export const FEISHU_RTM_CONNECT_URL = process.env.FEISHU_RTM_CONNECT_URL || "";
+export const RESTART_CMD = process.env.RESTART_CMD || "npm run dev";
 
 const rawSafeDirs = process.env.SAFE_DIRS;
 export const SAFE_DIRS = normalizeDirList(

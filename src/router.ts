@@ -2,9 +2,10 @@ import os from "os";
 import path from "path";
 import { spawn } from "child_process";
 
-import { CODEX_BACKEND, DATA_DIR, MAX_CONTEXT_MESSAGES, SAFE_DIRS } from "./config.js";
+import { CODEX_BACKEND, DATA_DIR, MAX_CONTEXT_MESSAGES, PROJECT_ROOT, RESTART_CMD, SAFE_DIRS } from "./config.js";
 import { resetCodexCliSession, resetCodexThread, runCodex } from "./codex/runner.js";
 import { logger } from "./logger.js";
+import { PluginManager } from "./plugins/manager.js";
 import {
   addSafeDir,
   clearThreadIdForWorkspace,
@@ -14,6 +15,7 @@ import {
   clearWorkspaceForThreadId,
   createApproval,
   getCliSessionIdForWorkspace,
+  getConfirmNext,
   getConversationBackend,
   getConversationCliSessionId,
   getConversationPlugin,
@@ -29,6 +31,7 @@ import {
   getWorkspaceForThreadId,
   saveMessage,
   setCliSessionIdForWorkspace,
+  setConfirmNext,
   setConversationCliSessionId,
   setConversationWorkspace,
   setConversationPlugin,
@@ -38,6 +41,7 @@ import {
   setConversationThreadId,
   setGlobalModel,
   setThreadIdForWorkspace,
+  setRestartNotifyChatId,
   setWorkspaceForCliSessionId,
   setWorkspaceForThreadId,
   updateApprovalStatus,
@@ -50,6 +54,8 @@ export interface RouterDeps {
 
 const CONFIRM_PATTERN = /^(yes|y|确认|好|ok|执行)$/i;
 const REJECT_PATTERN = /^(no|n|取消|不要|stop)$/i;
+const CONFIRM_COMMANDS = new Set(["/confirm", "/approve"]);
+const REJECT_COMMANDS = new Set(["/cancel", "/reject"]);
 const PLUGINS = ["codex"] as const;
 const CODEX_ONLY_COMMANDS = new Set([
   "cli",
@@ -61,7 +67,20 @@ const CODEX_ONLY_COMMANDS = new Set([
   "resume",
   "status",
   "git",
+  "confirm",
+  "cancel",
+  "restart",
 ]);
+let pluginManager: PluginManager | null = null;
+
+function getPluginManager(deps: RouterDeps): PluginManager {
+  if (!pluginManager) {
+    pluginManager = new PluginManager({ sendMessage: deps.sendMessage });
+  } else {
+    pluginManager.setHost({ sendMessage: deps.sendMessage });
+  }
+  return pluginManager;
+}
 
 export async function handleInbound(
   msg: InboundMessage,
@@ -73,13 +92,19 @@ export async function handleInbound(
   const pending = getPendingApproval(conversationId);
   if (pending) {
     const text = msg.text.trim();
+    const lower = text.toLowerCase();
+    if (REJECT_COMMANDS.has(lower)) {
+      updateApprovalStatus(pending.id, "rejected");
+      await deps.sendMessage(msg.chatId, "已取消执行。可以继续提新的需求。");
+      return;
+    }
     if (text.startsWith("/") && text.slice(1).trim().toLowerCase() === "exit") {
       updateApprovalStatus(pending.id, "rejected");
       clearConversationPlugin(conversationId);
       await deps.sendMessage(msg.chatId, "已退出当前插件，并取消待确认操作。");
       return;
     }
-    if (CONFIRM_PATTERN.test(text)) {
+    if (CONFIRM_COMMANDS.has(lower) || CONFIRM_PATTERN.test(text)) {
       updateApprovalStatus(pending.id, "approved");
       await handleApprovalExecution(pending.payload, deps, conversationId, msg.chatId);
       return;
@@ -109,7 +134,22 @@ export async function handleInbound(
   }
 
   if (plugin !== "codex") {
-    await deps.sendMessage(msg.chatId, `当前插件 ${plugin} 暂未实现处理逻辑。`);
+    const manager = getPluginManager(deps);
+    if (!manager.isInstalled(plugin) || !manager.isEnabled(plugin)) {
+      await deps.sendMessage(msg.chatId, `当前插件 ${plugin} 未安装或已禁用。`);
+      return;
+    }
+    const workspaceDir = resolveWorkspaceDir(conversationId);
+    await manager.handleEvent(
+      plugin,
+      "message_received",
+      { text: msg.text, timestamp: msg.timestamp },
+      {
+        conversationId,
+        chatId: msg.chatId,
+        workspaceDir,
+      },
+    );
     return;
   }
 
@@ -139,10 +179,29 @@ export async function handleInbound(
   saveMessage(conversationId, "user", msg.text, msg.timestamp);
 
   try {
+    const forceExecute = getConfirmNext(conversationId);
+    if (forceExecute) {
+      setConfirmNext(conversationId, false);
+      const response = await runCodex(request, workspaceDir, "proposal");
+      if (response.type === "needs_approval") {
+        const execResponse = await runCodex(request, workspaceDir, "execute");
+        if (execResponse.type === "message") {
+          saveMessage(conversationId, "assistant", execResponse.text);
+          await deps.sendMessage(msg.chatId, execResponse.text || "(无输出)");
+        }
+        return;
+      }
+      if (response.text) {
+        saveMessage(conversationId, "assistant", response.text);
+        await deps.sendMessage(msg.chatId, response.text);
+      }
+      return;
+    }
+
     const response = await runCodex(request, workspaceDir, "proposal");
 
     if (response.type === "needs_approval") {
-      const payload = JSON.stringify({ request, workspaceDir });
+      const payload = JSON.stringify({ type: "codex", request, workspaceDir });
       createApproval(response.approvalId, conversationId, payload);
       const preface = response.text ? `${response.text}\n\n` : "";
       await deps.sendMessage(
@@ -169,12 +228,36 @@ async function handleApprovalExecution(
   chatId: string,
 ): Promise<void> {
   try {
-    const parsed = JSON.parse(payload) as { request: AgentRequest; workspaceDir: string };
-    const response = await runCodex(parsed.request, parsed.workspaceDir, "execute");
-    if (response.type === "message") {
-      saveMessage(conversationId, "assistant", response.text);
-      await deps.sendMessage(chatId, response.text || "(无输出)");
+    const parsed = JSON.parse(payload) as
+      | { type?: "codex"; request: AgentRequest; workspaceDir: string }
+      | { type: "plugin"; action: "embed" | "sandbox_off"; name: string };
+
+    if (parsed && typeof parsed === "object" && "type" in parsed && parsed.type === "plugin") {
+      const manager = getPluginManager(deps);
+      if (parsed.action === "embed") {
+        manager.approveEmbed(parsed.name);
+        await manager.setRuntimeMode(parsed.name, "embed", true);
+        await deps.sendMessage(chatId, `已批准插件 ${parsed.name} 内嵌运行并立即生效。`);
+        return;
+      }
+      if (parsed.action === "sandbox_off") {
+        manager.approveSandboxOff(parsed.name);
+        await manager.setSandboxMode(parsed.name, "off", true);
+        await deps.sendMessage(chatId, `已批准插件 ${parsed.name} 关闭 sandbox 并立即生效。`);
+        return;
+      }
     }
+
+    if (parsed && typeof parsed === "object" && "request" in parsed && "workspaceDir" in parsed) {
+      const response = await runCodex(parsed.request, parsed.workspaceDir, "execute");
+      if (response.type === "message") {
+        saveMessage(conversationId, "assistant", response.text);
+        await deps.sendMessage(chatId, response.text || "(无输出)");
+      }
+      return;
+    }
+
+    await deps.sendMessage(chatId, "审批内容无法识别，已忽略。");
   } catch (err) {
     logger.error({ err }, "Approval execution failed");
     await deps.sendMessage(chatId, "执行失败，请稍后重试。");
@@ -265,11 +348,12 @@ async function handleCommand(
     }
     case "mode": {
       const backend = (getConversationBackend(conversationId) || CODEX_BACKEND).toLowerCase();
+      const hint = getConfirmNext(conversationId) ? "（下一条将自动执行）" : "";
       if (backend === "sdk") {
-        await deps.sendMessage(chatId, "当前模式：SDK（不执行本地命令/写文件）。需要执行请切换 /cli。");
+        await deps.sendMessage(chatId, `当前模式：SDK（不执行本地命令/写文件）。需要执行请切换 /cli。${hint}`);
         return;
       }
-      await deps.sendMessage(chatId, "当前模式：CLI（workspace-write，执行前可能需要确认）。");
+      await deps.sendMessage(chatId, `当前模式：CLI（workspace-write，执行前可能需要确认）。${hint}`);
       return;
     }
     case "status": {
@@ -295,6 +379,29 @@ async function handleCommand(
     case "git":
       await handleGitCommand(command.args, conversationId, deps, chatId);
       return;
+    case "confirm": {
+      const backend = (getConversationBackend(conversationId) || CODEX_BACKEND).toLowerCase();
+      if (backend !== "cli") {
+        setConversationBackend(conversationId, "cli");
+      }
+      setConfirmNext(conversationId, true);
+      const prefix = backend !== "cli" ? "已切换到 CLI。 " : "";
+      await deps.sendMessage(chatId, `${prefix}已进入一次性写入模式。下一条消息将自动执行。`);
+      return;
+    }
+    case "restart": {
+      await handleRestartCommand(deps, chatId);
+      return;
+    }
+    case "cancel": {
+      if (getConfirmNext(conversationId)) {
+        setConfirmNext(conversationId, false);
+        await deps.sendMessage(chatId, "已取消一次性写入模式。");
+        return;
+      }
+      await deps.sendMessage(chatId, "当前没有待确认的操作。");
+      return;
+    }
     case "resume": {
       if (command.args.length < 1) {
         await deps.sendMessage(chatId, "用法：/resume <id> 或 /resume cli <sessionId> 或 /resume sdk <threadId>");
@@ -387,6 +494,12 @@ async function handleCommand(
       return;
     case "model":
       await handleModelCommand(command.args, conversationId, deps, chatId);
+      return;
+    case "plugin":
+      await handlePluginCommand(command.args, conversationId, deps, chatId);
+      return;
+    case "p":
+      await handlePluginDirect(command.args, conversationId, deps, chatId);
       return;
     default:
       await deps.sendMessage(chatId, "未知指令。输入 /help 查看可用命令。");
@@ -486,7 +599,7 @@ async function handleGitCommand(
   chatId: string,
 ): Promise<void> {
   if (args.length === 0) {
-    await deps.sendMessage(chatId, "用法：/git ci [message] 或 /git push");
+    await deps.sendMessage(chatId, "用法：/git ci [message] 或 /git push 或 /git diff");
     return;
   }
   const workspaceDir = resolveWorkspaceDir(conversationId);
@@ -555,10 +668,52 @@ async function handleGitCommand(
       return;
     }
 
-    await deps.sendMessage(chatId, "用法：/git ci [message] 或 /git push");
+    if (sub === "diff") {
+      const diffResult = await runShell("git", ["diff", "--name-only"], workspaceDir);
+      if (diffResult.code !== 0) {
+        await deps.sendMessage(
+          chatId,
+          `git diff 失败：${formatShellError(diffResult)}`,
+        );
+        return;
+      }
+      const list = diffResult.stdout.trim();
+      await deps.sendMessage(chatId, list ? `变更文件：\n${list}` : "没有检测到未提交的变更。");
+      return;
+    }
+
+    await deps.sendMessage(chatId, "用法：/git ci [message] 或 /git push 或 /git diff");
   } catch (err) {
     await deps.sendMessage(chatId, `git 执行失败：${String(err)}`);
   }
+}
+
+async function handleRestartCommand(
+  deps: RouterDeps,
+  chatId: string,
+): Promise<void> {
+  try {
+    setRestartNotifyChatId(chatId);
+    const { cmd, args } = splitCommand(RESTART_CMD);
+    const child = spawn(cmd, args, {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+    await deps.sendMessage(chatId, "正在重启服务…");
+    process.exit(0);
+  } catch (err) {
+    await deps.sendMessage(chatId, `重启失败：${String(err)}`);
+  }
+}
+
+function splitCommand(raw: string): { cmd: string; args: string[] } {
+  const parts = raw.trim().split(/\s+/).filter(Boolean);
+  const cmd = parts[0] || "npm";
+  const args = parts.length > 1 ? parts.slice(1) : ["run", "dev"];
+  return { cmd, args };
 }
 
 type ShellResult = { code: number; stdout: string; stderr: string };
@@ -644,7 +799,19 @@ function formatLastExchange(messages: Array<{ role: "user" | "assistant"; conten
 function buildHelpMessage(plugin: string | null): string {
   const lines = ["可用指令：", "/help", "/exit"];
   if (!plugin) {
-    lines.push("/codex");
+    lines.push(
+      "/codex",
+      "/plugin list",
+      "/plugin info <name>",
+      "/plugin install <path>",
+      "/plugin uninstall <name>",
+      "/plugin enable|disable <name>",
+      "/plugin approve <name>",
+      "/plugin runtime <name> isolate|embed",
+      "/plugin sandbox <name> on|off",
+      "/plugin use <name>",
+      "/p <name> <cmd>",
+    );
     return lines.join("\n");
   }
 
@@ -662,16 +829,280 @@ function buildHelpMessage(plugin: string | null): string {
       "/status",
       "/dir",
       "/dir set <path>",
+      "/confirm",
+      "/cancel",
+      "/restart",
       "/git ci [message]",
+      "/git diff",
       "/git push",
       "/resume <id>",
       "/resume cli <sessionId>",
       "/resume sdk <threadId>",
       "/reset --hard",
     );
+    lines.push(
+      "/plugin list",
+      "/plugin info <name>",
+      "/plugin install <path>",
+      "/plugin uninstall <name>",
+      "/plugin enable|disable <name>",
+      "/plugin approve <name>",
+      "/plugin runtime <name> isolate|embed",
+      "/plugin sandbox <name> on|off",
+      "/plugin use <name>",
+      "/p <name> <cmd>",
+    );
     return lines.join("\n");
   }
 
-  lines.push("/codex");
+  lines.push(
+    "/codex",
+    "/plugin list",
+    "/plugin info <name>",
+    "/plugin install <path>",
+    "/plugin uninstall <name>",
+    "/plugin enable|disable <name>",
+    "/plugin use <name>",
+    "/plugin approve <name>",
+    "/plugin runtime <name> isolate|embed",
+    "/plugin sandbox <name> on|off",
+    "/p <name> <cmd>",
+  );
   return lines.join("\n");
+}
+
+async function handlePluginCommand(
+  args: string[],
+  conversationId: string,
+  deps: RouterDeps,
+  chatId: string,
+): Promise<void> {
+  try {
+    const manager = getPluginManager(deps);
+    const sub = args[0] || "list";
+    if (sub === "list") {
+      const items = manager.list();
+      if (items.length === 0) {
+        await deps.sendMessage(chatId, "暂无已安装插件。");
+        return;
+      }
+      const lines = items.map((entry) => {
+        const status = entry.enabled ? "enabled" : "disabled";
+        return `${entry.name}@${entry.version} (${status})`;
+      });
+      await deps.sendMessage(chatId, `已安装插件：\n${lines.join("\n")}`);
+      return;
+    }
+
+    if (sub === "info") {
+      const name = args[1];
+      if (!name) {
+        await deps.sendMessage(chatId, "用法：/plugin info <name>");
+        return;
+      }
+      const entry = manager.get(name);
+      if (!entry) {
+        await deps.sendMessage(chatId, `插件 ${name} 未安装。`);
+        return;
+      }
+      const effective = manager.getEffectiveRuntime(entry);
+      const lines = [
+        `名称：${entry.name}`,
+        `版本：${entry.version}`,
+        `路径：${entry.path}`,
+        `状态：${entry.enabled ? "enabled" : "disabled"}`,
+        `配置：${entry.runtime.mode}/${entry.runtime.sandbox}`,
+        `生效：${effective.mode}/${effective.sandbox}`,
+        `内嵌审批：${entry.approvedEmbed ? "yes" : "no"}`,
+        `sandbox-off 审批：${entry.approvedSandboxOff ? "yes" : "no"}`,
+      ];
+      await deps.sendMessage(chatId, lines.join("\n"));
+      return;
+    }
+
+    if (sub === "install") {
+      const src = args.slice(1).join(" ").trim();
+      if (!src) {
+        await deps.sendMessage(chatId, "用法：/plugin install <path>");
+        return;
+      }
+      const baseDir = resolveWorkspaceDir(conversationId);
+      const resolved = path.isAbsolute(src) ? path.resolve(src) : path.resolve(baseDir, src);
+      const entry = await manager.installFromPath(resolved);
+      await deps.sendMessage(chatId, `插件已安装：${entry.name}@${entry.version}`);
+      return;
+    }
+
+    if (sub === "uninstall") {
+      const name = args[1];
+      if (!name) {
+        await deps.sendMessage(chatId, "用法：/plugin uninstall <name>");
+        return;
+      }
+      await manager.uninstall(name);
+      await deps.sendMessage(chatId, `插件已卸载：${name}`);
+      return;
+    }
+
+    if (sub === "enable") {
+      const name = args[1];
+      if (!name) {
+        await deps.sendMessage(chatId, "用法：/plugin enable <name>");
+        return;
+      }
+      await manager.enable(name);
+      await deps.sendMessage(chatId, `插件已启用：${name}`);
+      return;
+    }
+
+    if (sub === "disable") {
+      const name = args[1];
+      if (!name) {
+        await deps.sendMessage(chatId, "用法：/plugin disable <name>");
+        return;
+      }
+      await manager.disable(name);
+      await deps.sendMessage(chatId, `插件已禁用：${name}`);
+      return;
+    }
+
+    if (sub === "approve") {
+      const name = args[1];
+      if (!name) {
+        await deps.sendMessage(chatId, "用法：/plugin approve <name>");
+        return;
+      }
+      manager.approveEmbed(name);
+      await deps.sendMessage(chatId, `插件 ${name} 已允许内嵌运行。`);
+      return;
+    }
+
+    if (sub === "runtime") {
+      const name = args[1];
+      const mode = args[2] as "isolate" | "embed" | undefined;
+      if (!name || !mode) {
+        await deps.sendMessage(chatId, "用法：/plugin runtime <name> isolate|embed");
+        return;
+      }
+      if (mode !== "isolate" && mode !== "embed") {
+        await deps.sendMessage(chatId, "用法：/plugin runtime <name> isolate|embed");
+        return;
+      }
+      const entry = manager.get(name);
+      if (!entry) {
+        await deps.sendMessage(chatId, `插件 ${name} 未安装。`);
+        return;
+      }
+      if (mode === "embed" && !entry.approvedEmbed) {
+        createPluginApproval("embed", name, conversationId);
+        await deps.sendMessage(
+          chatId,
+          `需要确认后执行。\n摘要：允许插件 ${name} 以内嵌模式运行\n回复“确认”继续，回复“取消”终止。`,
+        );
+        return;
+      }
+      await manager.setRuntimeMode(name, mode);
+      await deps.sendMessage(chatId, `插件 ${name} 运行模式已设置为 ${mode}。`);
+      return;
+    }
+
+    if (sub === "sandbox") {
+      const name = args[1];
+      const mode = args[2] as "on" | "off" | undefined;
+      if (!name || !mode) {
+        await deps.sendMessage(chatId, "用法：/plugin sandbox <name> on|off");
+        return;
+      }
+      if (mode !== "on" && mode !== "off") {
+        await deps.sendMessage(chatId, "用法：/plugin sandbox <name> on|off");
+        return;
+      }
+      const entry = manager.get(name);
+      if (!entry) {
+        await deps.sendMessage(chatId, `插件 ${name} 未安装。`);
+        return;
+      }
+      if (mode === "off" && !entry.approvedSandboxOff) {
+        createPluginApproval("sandbox_off", name, conversationId);
+        await deps.sendMessage(
+          chatId,
+          `需要确认后执行。\n摘要：允许插件 ${name} 在隔离模式关闭 sandbox\n回复“确认”继续，回复“取消”终止。`,
+        );
+        return;
+      }
+      await manager.setSandboxMode(name, mode);
+      await deps.sendMessage(chatId, `插件 ${name} sandbox 已设置为 ${mode}。`);
+      return;
+    }
+
+    if (sub === "use") {
+      const name = args[1];
+      if (!name) {
+        await deps.sendMessage(chatId, "用法：/plugin use <name>");
+        return;
+      }
+      if (!manager.isInstalled(name) || !manager.isEnabled(name)) {
+        await deps.sendMessage(chatId, `插件 ${name} 未安装或已禁用。`);
+        return;
+      }
+      setConversationPlugin(conversationId, name);
+      await deps.sendMessage(chatId, `已进入 ${name} 插件。输入 /help 查看可用指令。`);
+      return;
+    }
+
+    await deps.sendMessage(
+      chatId,
+      "用法：/plugin list|info|install|uninstall|enable|disable|approve|runtime|sandbox|use",
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await deps.sendMessage(chatId, `插件操作失败：${message}`);
+  }
+}
+
+function createPluginApproval(
+  action: "embed" | "sandbox_off",
+  name: string,
+  conversationId: string,
+): string {
+  const approvalId = `appr_plugin_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const payload = JSON.stringify({ type: "plugin", action, name });
+  createApproval(approvalId, conversationId, payload);
+  return approvalId;
+}
+
+async function handlePluginDirect(
+  args: string[],
+  conversationId: string,
+  deps: RouterDeps,
+  chatId: string,
+): Promise<void> {
+  try {
+    if (args.length < 2) {
+      await deps.sendMessage(chatId, "用法：/p <plugin> <cmd> [args...]");
+      return;
+    }
+    const name = args[0];
+    const cmd = args[1];
+    const cmdArgs = args.slice(2);
+    const manager = getPluginManager(deps);
+    if (!manager.isInstalled(name) || !manager.isEnabled(name)) {
+      await deps.sendMessage(chatId, `插件 ${name} 未安装或已禁用。`);
+      return;
+    }
+    const workspaceDir = resolveWorkspaceDir(conversationId);
+    await manager.handleCommand(
+      name,
+      cmd,
+      cmdArgs,
+      {
+        conversationId,
+        chatId,
+        workspaceDir,
+      },
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await deps.sendMessage(chatId, `插件命令执行失败：${message}`);
+  }
 }

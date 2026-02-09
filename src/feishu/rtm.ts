@@ -30,13 +30,12 @@ export class FeishuRtmClient extends EventEmitter {
 
     const baseConfig = getSdkBaseConfig();
     logger.info({ domain: baseConfig.domain }, "Feishu SDK domain");
+    const loggerLevel = resolveLoggerLevel(FEISHU_SDK_LOG_LEVEL);
     this.wsClient = new Lark.WSClient({
       appId: baseConfig.appId,
       appSecret: baseConfig.appSecret,
       ...(baseConfig.domain ? { domain: baseConfig.domain } : {}),
-      ...(resolveLoggerLevel(FEISHU_SDK_LOG_LEVEL)
-        ? { loggerLevel: resolveLoggerLevel(FEISHU_SDK_LOG_LEVEL) }
-        : {}),
+      ...(loggerLevel !== undefined ? { loggerLevel } : {}),
     });
 
     this.wsClient.start({ eventDispatcher: dispatcher });
@@ -49,13 +48,18 @@ export class FeishuRtmClient extends EventEmitter {
     const wsClient = this.wsClient;
     this.wsClient = null;
 
-    if (typeof (wsClient as { stop?: () => Promise<void> | void }).stop === "function") {
-      await (wsClient as { stop: () => Promise<void> | void }).stop();
+    const wsClientAny = wsClient as unknown as {
+      stop?: () => Promise<void> | void;
+      close?: () => Promise<void> | void;
+    };
+
+    if (typeof wsClientAny.stop === "function") {
+      await wsClientAny.stop();
       return;
     }
 
-    if (typeof (wsClient as { close?: () => Promise<void> | void }).close === "function") {
-      await (wsClient as { close: () => Promise<void> | void }).close();
+    if (typeof wsClientAny.close === "function") {
+      await wsClientAny.close();
     }
   }
 
@@ -126,9 +130,9 @@ export class FeishuRtmClient extends EventEmitter {
   }
 }
 
-function resolveLoggerLevel(value: string): Lark.LoggerLevel | null {
+function resolveLoggerLevel(value: string): Lark.LoggerLevel | undefined {
   const level = value.trim().toLowerCase();
-  if (!level) return null;
+  if (!level) return undefined;
   switch (level) {
     case "debug":
       return Lark.LoggerLevel.debug;
@@ -140,7 +144,7 @@ function resolveLoggerLevel(value: string): Lark.LoggerLevel | null {
     case "error":
       return Lark.LoggerLevel.error;
     default:
-      return null;
+      return undefined;
   }
 }
 

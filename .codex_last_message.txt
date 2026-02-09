@@ -1,0 +1,13 @@
+git diff 行数统计如下（新增/删除）：
+
+- README.md: +26 / -1  
+- docs/issue.csv: +1 / -0  
+- env-example: +1 / -1  
+- package-lock.json: +1044 / -0  
+- package.json: +5 / -1  
+- src/config.ts: +3 / -0  
+- src/feishu/rtm.ts: +18 / -6  
+- src/index.ts: +13 / -1  
+- src/router.ts: +450 / -11  
+
+合计：1543 行新增，39 行删除（9 个文件）。

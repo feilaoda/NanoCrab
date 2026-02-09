@@ -12,4 +12,4 @@ FEISHU_RTM_ENABLED=true
 SAFE_DIRS=~/workspace
 CODEX_CMD_BLOCK=mkfs,shutdown,dd
 CODEX_CMD_CONFIRM=rm,kill
-CODEX_CMD_ALLOW=ls,pwd,rg,cat,sed,head,tail,less,stat,whoami,uname,uptime,df,du,ps,top,htop,git,curl,wget,ping,traceroute,npm run
+CODEX_CMD_ALLOW=ls,pwd,rg,cat,head,tail,less,stat,whoami,uname,uptime,df,du,ps,top,htop,tree,find,git status,git diff,git log,git show,git branch,git rev-parse,git ls-files,git grep,git remote,git config --list,node -v,npm -v,pnpm -v,yarn -v,npm ls,npm config list,pnpm list,pnpm config list,yarn list,yarn config list,/^git (status|diff|log|show|branch|rev-parse|ls-files|grep|remote)\b/,/^rg\b/,/^ls\b/,/^cat\b/,/^head\b/,/^tail\b/

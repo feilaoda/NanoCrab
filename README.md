@@ -35,12 +35,21 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
     # CODEX_CMD_ALLOW=ls,cat,pwd
     # CODEX_TIMEOUT_MS=300000
     # MAX_CONTEXT_MESSAGES=20
+    # RESTART_CMD="npm run dev"
    # Optional overrides
    # FEISHU_API_BASE=https://open.feishu.cn
    ```
-3. Start:
+3. Start (no auto-reload by default):
    ```bash
    npm run dev
+   ```
+   If you want auto-reload, use:
+   ```bash
+   npm run dev:watch
+   ```
+   Or the tsx watcher:
+   ```bash
+   npm run dev:tsx
    ```
 
 ## Commands
@@ -58,12 +67,26 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - `/status` (show current directory and session/thread ids)
 - `/dir` (show current workspace dir)
 - `/dir set <path>` (bind workspace dir)
+- `/confirm` (approve pending execution)
+- `/cancel` (cancel pending execution or one-shot write mode)
+- `/restart` (restart the service using RESTART_CMD; will notify “服务已重启。” once connected)
 - `/git ci [message]` (stage & commit with auto message; omitted message uses git status summary)
+- `/git diff` (list changed files)
 - `/git push` (push current branch)
 - `/resume <id>` (bind current backend id; SDK thread or CLI session)
 - `/resume cli <sessionId>` (bind CLI session id)
 - `/resume sdk <threadId>` (bind SDK thread id)
 - `/reset --hard` (clear thread binding)
+- `/plugin list` (list installed plugins)
+- `/plugin info <name>` (show plugin info)
+- `/plugin install <path>` (install plugin from local path)
+- `/plugin uninstall <name>` (uninstall plugin)
+- `/plugin enable|disable <name>` (toggle plugin)
+- `/plugin approve <name>` (approve embed runtime)
+- `/plugin runtime <name> isolate|embed` (set runtime mode)
+- `/plugin sandbox <name> on|off` (set sandbox mode)
+- `/plugin use <name>` (enter plugin)
+- `/p <name> <cmd> [args...]` (invoke plugin command)
 
 ## Notes
 - Group chats require @ mention to trigger.
@@ -78,6 +101,8 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - Commands can be controlled via `CODEX_CMD_BLOCK` (forbidden), `CODEX_CMD_CONFIRM` (require confirmation), and `CODEX_CMD_ALLOW` (auto-execute without confirmation).
 - `SAFE_DIRS` restricts which directories can be used by `/dir set` and as working roots. When unset, it defaults to the project root.
 - `/dir set` 会自动把目标目录加入运行时安全列表（不改动 `.env`）。
+- `/confirm` 在无待确认操作时，会切到 CLI 并开启一次性写入模式，下一条消息将自动执行。
+- `RESTART_CMD` controls what `/restart` launches (default: `npm run dev`).
 
 ## Operations
 - Feishu RTM setup and verification: see `docs/operations.md`.
