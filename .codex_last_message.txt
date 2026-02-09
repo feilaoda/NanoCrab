@@ -1,7 +1,2 @@
-已按你的说明调整：在 `/cli --write` 下，非禁止且无需确认的提议会直接执行；被禁止或需确认的仍走原流程。
-
-- `src/router.ts:227` 写入模式下先做 proposal；需确认则创建审批，禁止/未解析则仅提示，其余直接执行  
-- `src/codex/runner.ts:45` 支持禁用自动执行并返回 `parsed/blocked/autoExecuted` 标记  
-- `src/types.ts:22` 扩展 `AgentResponse` 消息元数据字段  
-
-测试未运行。如需我跑 `npm run typecheck`，告诉我即可。
+好的，说明回执已生效。  
+如果你还想调整回执规则（比如命令也回执、群聊未@也回执、或仅私聊回执），告诉我你的偏好即可。

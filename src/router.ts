@@ -155,6 +155,9 @@ export async function handleInbound(
       await deps.sendMessage(msg.chatId, `当前插件 ${plugin} 未安装或已禁用。`);
       return;
     }
+    if (normalizedText.trim()) {
+      await deps.sendMessage(msg.chatId, "已收到");
+    }
     const workspaceDir = resolveWorkspaceDir(conversationId);
     await manager.handleEvent(
       plugin,
@@ -181,6 +184,9 @@ export async function handleInbound(
       `当前工作目录不在安全目录内，请先设置允许的目录。\n允许目录：${getAllowedDirs().join(", ") || "(未限制)"}\n使用：/dir set <path>`,
     );
     return;
+  }
+  if (normalizedText.trim()) {
+    await deps.sendMessage(msg.chatId, "已收到");
   }
   const contextMessages = getRecentMessages(conversationId, MAX_CONTEXT_MESSAGES);
 
