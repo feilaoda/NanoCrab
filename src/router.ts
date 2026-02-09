@@ -48,6 +48,19 @@ import {
   setWorkspaceForThreadId,
   updateApprovalStatus,
 } from "./store/db.js";
+import {
+  addMarketSubscription,
+  listMarketSubscriptions,
+  logAudit,
+  removeMarketSubscription,
+} from "./store/market.js";
+import {
+  findMarketSymbolInText,
+  formatMarketQuote,
+  getMarketQuote,
+  isMarketIntent,
+  normalizeMarketSymbol,
+} from "./tools/market/service.js";
 import { AgentRequest, InboundMessage } from "./types.js";
 
 export interface RouterDeps {
@@ -140,6 +153,16 @@ export async function handleInbound(
   const command = parseCommand(normalizedText);
   if (command) {
     await handleCommand(command, conversationId, plugin, deps, msg.chatId);
+    return;
+  }
+
+  const autoMarketHandled = await handleAutoMarketIntent(
+    normalizedText,
+    plugin,
+    deps,
+    msg.chatId,
+  );
+  if (autoMarketHandled) {
     return;
   }
 
@@ -567,6 +590,9 @@ async function handleCommand(
     case "dir":
       await handleWorkspaceCommand(command.args, conversationId, deps, chatId);
       return;
+    case "market":
+      await handleMarketCommand(command.args, deps, chatId);
+      return;
     case "git":
       await handleGitCommand(command.args, conversationId, deps, chatId);
       return;
@@ -780,6 +806,151 @@ async function handleWorkspaceCommand(
   }
 
   await deps.sendMessage(chatId, "用法：/dir 或 /dir set <path>");
+}
+
+async function handleAutoMarketIntent(
+  text: string,
+  plugin: string | null,
+  deps: RouterDeps,
+  chatId: string,
+): Promise<boolean> {
+  if (plugin && plugin !== "codex") return false;
+  const symbol = findMarketSymbolInText(text);
+  if (!symbol) return false;
+  if (!isMarketIntent(text) && text.trim() !== symbol) {
+    return false;
+  }
+  logAudit(chatId, "market.auto", JSON.stringify({ symbol }));
+  try {
+    const quote = await getMarketQuote(symbol);
+    await deps.sendMessage(chatId, formatMarketQuote(quote));
+  } catch (err) {
+    await deps.sendMessage(chatId, `行情获取失败：${String(err)}`);
+  }
+  return true;
+}
+
+function normalizeMarketInterval(value: string): string | null {
+  const raw = value.trim().toLowerCase();
+  if (raw === "1" || raw === "1m") return "1m";
+  if (raw === "5" || raw === "5m") return "5m";
+  if (raw === "15" || raw === "15m") return "15m";
+  return null;
+}
+
+function parseMarketInterval(args: string[]): { value: string | null; provided: boolean } {
+  const idx = args.findIndex((item) => item === "--interval" || item === "-i");
+  if (idx >= 0) {
+    const value = args[idx + 1];
+    if (!value) return { value: null, provided: true };
+    return { value: normalizeMarketInterval(value), provided: true };
+  }
+
+  const direct = args.find((item) => normalizeMarketInterval(item) !== null);
+  if (direct) {
+    return { value: normalizeMarketInterval(direct), provided: true };
+  }
+  return { value: null, provided: false };
+}
+
+async function handleMarketCommand(
+  args: string[],
+  deps: RouterDeps,
+  chatId: string,
+): Promise<void> {
+  const sub = (args[0] || "help").toLowerCase();
+
+  if (sub === "quote") {
+    const symbol = args[1];
+    if (!symbol) {
+      await deps.sendMessage(chatId, "用法：/market quote <symbol>");
+      return;
+    }
+    const normalized = normalizeMarketSymbol(symbol);
+    logAudit(chatId, "market.quote", JSON.stringify({ symbol: normalized }));
+    try {
+      const quote = await getMarketQuote(normalized);
+      await deps.sendMessage(chatId, formatMarketQuote(quote));
+    } catch (err) {
+      await deps.sendMessage(chatId, `行情获取失败：${String(err)}`);
+    }
+    return;
+  }
+
+  if (sub === "watch") {
+    const action = (args[1] || "list").toLowerCase();
+    if (action === "list") {
+      const subs = listMarketSubscriptions(chatId);
+      if (subs.length === 0) {
+        await deps.sendMessage(chatId, "暂无订阅。用法：/market watch add <symbol> --interval 5m");
+        return;
+      }
+      const lines = subs.map((subItem) => `- ${subItem.symbol} (${subItem.interval})`);
+      await deps.sendMessage(chatId, `当前订阅：\n${lines.join("\n")}`);
+      return;
+    }
+
+    if (action === "add") {
+      const symbol = args[2];
+      if (!symbol) {
+        await deps.sendMessage(chatId, "用法：/market watch add <symbol> --interval 5m");
+        return;
+      }
+      const parsedInterval = parseMarketInterval(args.slice(3));
+      if (parsedInterval.provided && !parsedInterval.value) {
+        await deps.sendMessage(chatId, "仅支持间隔：1m / 5m / 15m");
+        return;
+      }
+      const interval = parsedInterval.value ?? "5m";
+      const normalized = normalizeMarketSymbol(symbol);
+      if (!normalized) {
+        await deps.sendMessage(chatId, "请输入有效的标的代码。");
+        return;
+      }
+      const result = addMarketSubscription(chatId, normalized, interval);
+      logAudit(chatId, "market.watch.add", JSON.stringify({ symbol: normalized, interval }));
+      const note = result.created ? "已添加订阅" : "已更新订阅";
+      await deps.sendMessage(chatId, `${note}：${normalized}（${interval}）`);
+      return;
+    }
+
+    if (action === "remove") {
+      const symbol = args[2];
+      if (!symbol) {
+        await deps.sendMessage(chatId, "用法：/market watch remove <symbol> [--interval 5m]");
+        return;
+      }
+      const parsedInterval = parseMarketInterval(args.slice(3));
+      if (parsedInterval.provided && !parsedInterval.value) {
+        await deps.sendMessage(chatId, "仅支持间隔：1m / 5m / 15m");
+        return;
+      }
+      const interval = parsedInterval.value ?? undefined;
+      const normalized = normalizeMarketSymbol(symbol);
+      const removed = removeMarketSubscription(chatId, normalized, interval);
+      logAudit(chatId, "market.watch.remove", JSON.stringify({ symbol: normalized, interval }));
+      if (removed === 0) {
+        await deps.sendMessage(chatId, "未找到对应订阅。");
+        return;
+      }
+      const suffix = interval ? `（${interval}）` : "";
+      await deps.sendMessage(chatId, `已移除订阅：${normalized}${suffix}`);
+      return;
+    }
+
+    await deps.sendMessage(chatId, "用法：/market watch add|list|remove ...");
+    return;
+  }
+
+  if (sub === "list") {
+    await handleMarketCommand(["watch", "list"], deps, chatId);
+    return;
+  }
+
+  await deps.sendMessage(
+    chatId,
+    "用法：/market quote <symbol> | /market watch add <symbol> --interval 5m | /market watch list | /market watch remove <symbol> [--interval 5m]",
+  );
 }
 
 async function handleGitCommand(
@@ -1000,6 +1171,10 @@ function buildHelpMessage(plugin: string | null): string {
   if (!plugin) {
     lines.push(
       "/codex",
+      "/market quote <symbol>",
+      "/market watch add <symbol> --interval 5m",
+      "/market watch list",
+      "/market watch remove <symbol> [--interval 5m]",
       "/plugin list",
       "/plugin info <name>",
       "/plugin install <path>",
@@ -1017,6 +1192,10 @@ function buildHelpMessage(plugin: string | null): string {
   if (plugin === "codex") {
     lines.push(
       "/codex",
+      "/market quote <symbol>",
+      "/market watch add <symbol> --interval 5m",
+      "/market watch list",
+      "/market watch remove <symbol> [--interval 5m]",
       "/reset",
       "/model",
       "/model set <name>",
@@ -1054,6 +1233,10 @@ function buildHelpMessage(plugin: string | null): string {
 
   lines.push(
     "/codex",
+    "/market quote <symbol>",
+    "/market watch add <symbol> --interval 5m",
+    "/market watch list",
+    "/market watch remove <symbol> [--interval 5m]",
     "/plugin list",
     "/plugin info <name>",
     "/plugin install <path>",

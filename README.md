@@ -36,6 +36,10 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
     # CODEX_TIMEOUT_MS=300000
     # MAX_CONTEXT_MESSAGES=20
     # RESTART_CMD="npm run dev"
+    # Optional: Market
+    # MARKET_ALPHA_VANTAGE_API_KEY=xxxx
+    # MARKET_REQUEST_GAP_MS=15000
+    # MARKET_CACHE_TTL_MS=55000
    # Optional overrides
    # FEISHU_API_BASE=https://open.feishu.cn
    ```
@@ -56,6 +60,10 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - `/codex` (enter Codex plugin)
 - `/exit` (leave current plugin)
 - `/help`
+- `/market quote <symbol>`
+- `/market watch add <symbol> --interval 1m|5m|15m`
+- `/market watch list`
+- `/market watch remove <symbol> [--interval 1m|5m|15m]`
 - `/reset`
 - `/model`
 - `/model set <name>`
@@ -71,7 +79,7 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - `/cancel` (cancel pending execution or write mode)
 - `/restart` (restart the service using RESTART_CMD; will notify “服务已重启。” once connected)
 - `/git ci [message]` (stage & commit with auto message; omitted message uses git status summary)
-- `/git diff` (list changed files)
+- `/git diff` (list changed files with stats)
 - `/git push` (push current branch)
 - `/resume <id>` (bind current backend id; SDK thread or CLI session)
 - `/reset --hard` (clear thread binding)
@@ -98,9 +106,10 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - Commands can be controlled via `CODEX_CMD_BLOCK` (forbidden), `CODEX_CMD_CONFIRM` (require confirmation), and `CODEX_CMD_ALLOW` (auto-execute without confirmation).
 - `SAFE_DIRS` restricts which directories can be used by `/dir set` and as working roots. When unset, it defaults to the project root.
 - `/dir set` 会自动把目标目录加入运行时安全列表（不改动 `.env`）。
-- `/confirm` 在无待确认操作时，会切到 CLI 并开启一次性写入模式，下一条消息将自动执行。
+- `/confirm` 在无待确认操作时会提示使用 `/confirm --last`，不再进入一次性写入模式。
 - 若看到 `NEEDS_APPROVAL` 但 `/confirm` 仍提示无待确认，通常是输出使用了全角冒号导致解析失败；已兼容 `:` 与 `：`。
 - `RESTART_CMD` controls what `/restart` launches (default: `npm run dev`).
+- 行情标的会自动规范化：A 股 6 位代码补 `.SS/.SZ`，港股数字代码补 `.HK`。
 
 ## Operations
 - Feishu RTM setup and verification: see `docs/operations.md`.

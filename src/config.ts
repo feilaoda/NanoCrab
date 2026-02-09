@@ -47,6 +47,10 @@ export const CODEX_BIN = process.env.CODEX_BIN || "codex";
 export const CODEX_TIMEOUT_MS = Number(process.env.CODEX_TIMEOUT_MS || 300000);
 export const MAX_CONTEXT_MESSAGES = Number(process.env.MAX_CONTEXT_MESSAGES || 20);
 
+export const MARKET_ALPHA_VANTAGE_API_KEY = process.env.MARKET_ALPHA_VANTAGE_API_KEY || "";
+export const MARKET_REQUEST_GAP_MS = Number(process.env.MARKET_REQUEST_GAP_MS || 15000);
+export const MARKET_CACHE_TTL_MS = Number(process.env.MARKET_CACHE_TTL_MS || 55000);
+
 export const DEFAULT_LANGUAGE = process.env.DEFAULT_LANGUAGE || "zh";
 
 function parseList(raw: string): string[] {

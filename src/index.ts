@@ -3,6 +3,7 @@ import { sendFeishuMessage } from "./feishu/api.js";
 import { FeishuRtmClient } from "./feishu/rtm.js";
 import { logger } from "./logger.js";
 import { handleInbound } from "./router.js";
+import { startMarketScheduler } from "./scheduler/market.js";
 import { clearRestartNotifyChatId, getRestartNotifyChatId, initDatabase } from "./store/db.js";
 import { InboundMessage } from "./types.js";
 
@@ -48,6 +49,8 @@ class PerChatQueue {
 async function main(): Promise<void> {
   initDatabase();
   logger.info("Database initialized");
+
+  startMarketScheduler(sendFeishuMessage);
 
   if (!FEISHU_RTM_ENABLED) {
     logger.error("FEISHU_RTM_ENABLED is false; nothing to run.");
