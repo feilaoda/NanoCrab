@@ -23,6 +23,9 @@ export type AgentResponse =
   | {
       type: "message";
       text: string;
+      parsed?: boolean;
+      blocked?: boolean;
+      autoExecuted?: boolean;
     }
   | {
       type: "needs_approval";

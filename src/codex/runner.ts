@@ -46,12 +46,13 @@ export async function runCodex(
   request: AgentRequest,
   workspaceDir: string,
   mode: CodexRunMode,
+  options?: { allowAutoExecute?: boolean },
 ): Promise<AgentResponse> {
   const backend = request.backendOverride || CODEX_BACKEND;
   if (backend === "sdk") {
-    return runCodexSdk(request, mode, workspaceDir);
+    return runCodexSdk(request, mode, workspaceDir, options);
   }
-  return runCodexCli(request, workspaceDir, mode);
+  return runCodexCli(request, workspaceDir, mode, options);
 }
 
 export function resetCodexThread(conversationId: string): void {
@@ -67,6 +68,7 @@ async function runCodexSdk(
   request: AgentRequest,
   mode: CodexRunMode,
   workspaceDir?: string,
+  options?: { allowAutoExecute?: boolean },
 ): Promise<AgentResponse> {
   const thread = await getOrCreateThread(request.conversationId, workspaceDir);
   const prompt = buildPrompt(request, mode);
@@ -89,7 +91,7 @@ async function runCodexSdk(
 
   const parsed = parseProposal(output);
   if (!parsed) {
-    return { type: "message", text: output.trim() || "(empty response)" };
+    return { type: "message", text: output.trim() || "(empty response)", parsed: false };
   }
 
   const policy = evaluateCommandPolicy(parsed.commands);
@@ -97,15 +99,21 @@ async function runCodexSdk(
     return {
       type: "message",
       text: `命令被策略禁止：${policy.blockedCommands.join("; ")}`,
+      parsed: true,
+      blocked: true,
     };
   }
 
   const needsApproval = computeApprovalDecision(parsed, policy);
   if (!needsApproval) {
-    if (policy.autoExecute) {
-      return runCodexSdk(request, "execute", workspaceDir);
+    if (policy.autoExecute && options?.allowAutoExecute !== false) {
+      const execResponse = await runCodexSdk(request, "execute", workspaceDir, options);
+      if (execResponse.type === "message") {
+        return { ...execResponse, autoExecuted: true, parsed: true };
+      }
+      return execResponse;
     }
-    return { type: "message", text: parsed.response || "(empty response)" };
+    return { type: "message", text: parsed.response || "(empty response)", parsed: true };
   }
 
   return {
@@ -282,6 +290,7 @@ async function runCodexCli(
   request: AgentRequest,
   workspaceDir: string,
   mode: CodexRunMode,
+  options?: { allowAutoExecute?: boolean },
 ): Promise<AgentResponse> {
   fs.mkdirSync(workspaceDir, { recursive: true });
 
@@ -336,7 +345,7 @@ async function runCodexCli(
 
   const parsed = parseProposal(output);
   if (!parsed) {
-    return { type: "message", text: output.trim() || "(empty response)" };
+    return { type: "message", text: output.trim() || "(empty response)", parsed: false };
   }
 
   const policy = evaluateCommandPolicy(parsed.commands);
@@ -344,15 +353,21 @@ async function runCodexCli(
     return {
       type: "message",
       text: `命令被策略禁止：${policy.blockedCommands.join("; ")}`,
+      parsed: true,
+      blocked: true,
     };
   }
 
   const needsApproval = computeApprovalDecision(parsed, policy);
   if (!needsApproval) {
-    if (policy.autoExecute) {
-      return runCodexCli(request, workspaceDir, "execute");
+    if (policy.autoExecute && options?.allowAutoExecute !== false) {
+      const execResponse = await runCodexCli(request, workspaceDir, "execute", options);
+      if (execResponse.type === "message") {
+        return { ...execResponse, autoExecuted: true, parsed: true };
+      }
+      return execResponse;
     }
-    return { type: "message", text: parsed.response || "(empty response)" };
+    return { type: "message", text: parsed.response || "(empty response)", parsed: true };
   }
 
   return {

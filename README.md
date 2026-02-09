@@ -60,7 +60,7 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - `/model`
 - `/model set <name>`
 - `/model set --global <name>`
-- `/cli` (switch to Codex CLI backend)
+- `/cli [--write|--safe]` (switch to Codex CLI backend; `--write` auto-executes, `--safe` exits write mode)
 - `/sdk` (switch to Codex SDK backend)
 - `/backend` (show current backend)
 - `/mode` (show execution mode)
@@ -69,7 +69,7 @@ Standalone Feishu RTM (WebSocket) + Codex CLI assistant using the official Feish
 - `/dir set <path>` (bind workspace dir)
 - `/confirm` (approve pending execution)
 - `/confirm --last` (execute the last user request immediately)
-- `/cancel` (cancel pending execution or one-shot write mode)
+- `/cancel` (cancel pending execution or write mode)
 - `/restart` (restart the service using RESTART_CMD; will notify “服务已重启。” once connected)
 - `/git ci [message]` (stage & commit with auto message; omitted message uses git status summary)
 - `/git diff` (list changed files)

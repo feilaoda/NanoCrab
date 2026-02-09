@@ -21,6 +21,7 @@ import {
   getConversationPlugin,
   getConversationThreadId,
   getConversationWorkspace,
+  getWriteMode,
   getEffectiveModel,
   getOrCreateConversation,
   getPendingApproval,
@@ -41,6 +42,7 @@ import {
   setConversationThreadId,
   setGlobalModel,
   setThreadIdForWorkspace,
+  setWriteMode,
   setRestartNotifyChatId,
   setWorkspaceForCliSessionId,
   setWorkspaceForThreadId,
@@ -194,6 +196,7 @@ export async function handleInbound(
 
   try {
     const forceExecute = getConfirmNext(conversationId);
+    const writeMode = getWriteMode(conversationId);
     if (forceExecute) {
       setConfirmNext(conversationId, false);
       const response = await runCodex(request, workspaceDir, "proposal");
@@ -217,6 +220,46 @@ export async function handleInbound(
         }
         saveMessage(conversationId, "assistant", response.text);
         await deps.sendMessage(msg.chatId, response.text);
+      }
+      return;
+    }
+
+    if (writeMode) {
+      const response = await runCodex(request, workspaceDir, "proposal", { allowAutoExecute: false });
+      if (response.type === "needs_approval") {
+        const payload = JSON.stringify({ type: "codex", request, workspaceDir });
+        createApproval(response.approvalId, conversationId, payload);
+        const preface = response.text ? `${response.text}\n\n` : "";
+        await deps.sendMessage(
+          msg.chatId,
+          `${preface}需要确认后执行。\n摘要：${response.summary}\n回复“确认”继续，回复“取消”终止。`,
+        );
+        return;
+      }
+
+      if (response.text) {
+        const inlineApproval = parseInlineApproval(response.text);
+        if (inlineApproval) {
+          const payload = JSON.stringify({ type: "codex", request, workspaceDir });
+          const approvalId = `appr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+          createApproval(approvalId, conversationId, payload);
+          const preface = inlineApproval.response ? `${inlineApproval.response}\n\n` : "";
+          await deps.sendMessage(
+            msg.chatId,
+            `${preface}需要确认后执行。\n摘要：${inlineApproval.summary || "准备执行更改"}\n回复“确认”继续，回复“取消”终止。`,
+          );
+          return;
+        }
+        if (response.blocked || response.parsed === false) {
+          saveMessage(conversationId, "assistant", response.text);
+          await deps.sendMessage(msg.chatId, response.text);
+          return;
+        }
+        const execResponse = await runCodex(request, workspaceDir, "execute");
+        if (execResponse.type === "message") {
+          saveMessage(conversationId, "assistant", execResponse.text);
+          await deps.sendMessage(msg.chatId, execResponse.text || "(无输出)");
+        }
       }
       return;
     }
@@ -447,9 +490,35 @@ async function handleCommand(
       await deps.sendMessage(chatId, buildHelpMessage(plugin));
       return;
     case "cli":
-      setConversationBackend(conversationId, "cli");
-      await deps.sendMessage(chatId, "已切换到 CLI 后端（单次执行）。");
-      return;
+      {
+        const wantsWrite = command.args.includes("--write") || command.args.includes("write");
+        const wantsSafe =
+          command.args.includes("--safe") ||
+          command.args.includes("safe") ||
+          command.args.includes("--ask") ||
+          command.args.includes("ask");
+        if (wantsWrite && wantsSafe) {
+          await deps.sendMessage(chatId, "用法：/cli 或 /cli --write 或 /cli --safe");
+          return;
+        }
+        setConversationBackend(conversationId, "cli");
+        if (wantsWrite) {
+          setWriteMode(conversationId, true);
+          setConfirmNext(conversationId, false);
+          await deps.sendMessage(chatId, "已切换到 CLI 并进入写入模式（无需二次确认，但仍遵守禁止/需确认策略）。");
+          return;
+        }
+        if (wantsSafe) {
+          setWriteMode(conversationId, false);
+          setConfirmNext(conversationId, false);
+          await deps.sendMessage(chatId, "已切换到 CLI，并退出写入模式。");
+          return;
+        }
+        const writeMode = getWriteMode(conversationId);
+        const suffix = writeMode ? "（写入模式已开启）" : "（执行前可能需要确认）";
+        await deps.sendMessage(chatId, `已切换到 CLI 后端${suffix}。`);
+        return;
+      }
     case "sdk":
       setConversationBackend(conversationId, "sdk");
       await deps.sendMessage(chatId, "已切换到 SDK 后端（线程持续对话）。");
@@ -462,9 +531,18 @@ async function handleCommand(
     }
     case "mode": {
       const backend = (getConversationBackend(conversationId) || CODEX_BACKEND).toLowerCase();
-      const hint = getConfirmNext(conversationId) ? "（下一条将自动执行）" : "";
+      const confirmNext = getConfirmNext(conversationId);
+      const writeMode = getWriteMode(conversationId);
+      const hints: string[] = [];
+      if (writeMode) hints.push("持续自动执行");
+      if (confirmNext) hints.push("下一条将自动执行");
+      const hint = hints.length ? `（${hints.join("；")}）` : "";
       if (backend === "sdk") {
-        await deps.sendMessage(chatId, `当前模式：SDK（不执行本地命令/写文件）。需要执行请切换 /cli。${hint}`);
+        const extra = writeMode ? "写入模式仅对 CLI 生效。" : "";
+        await deps.sendMessage(
+          chatId,
+          `当前模式：SDK（不执行本地命令/写文件）。需要执行请切换 /cli。${extra}${hint}`,
+        );
         return;
       }
       await deps.sendMessage(chatId, `当前模式：CLI（workspace-write，执行前可能需要确认）。${hint}`);
@@ -478,11 +556,14 @@ async function handleCommand(
         getConversationCliSessionId(conversationId) || getCliSessionIdForWorkspace(workspaceDir);
       const threadId =
         getConversationThreadId(conversationId) || getThreadIdForWorkspace(workspaceDir);
+      const confirmNext = getConfirmNext(conversationId);
+      const writeMode = getWriteMode(conversationId);
       const lines = [
         `目录：${workspaceDir}`,
         `后端：${backendLabel}`,
         `CLI session：${cliSessionId || "(无)"}`,
         `SDK thread：${threadId || "(无)"}`,
+        `写入模式：${writeMode ? "on" : "off"}${confirmNext ? "（下一条自动执行）" : ""}`,
       ];
       await deps.sendMessage(chatId, lines.join("\n"));
       return;
@@ -516,6 +597,11 @@ async function handleCommand(
       if (getConfirmNext(conversationId)) {
         setConfirmNext(conversationId, false);
         await deps.sendMessage(chatId, "已取消一次性写入模式。");
+        return;
+      }
+      if (getWriteMode(conversationId)) {
+        setWriteMode(conversationId, false);
+        await deps.sendMessage(chatId, "已退出写入模式。");
         return;
       }
       await deps.sendMessage(chatId, "当前没有待确认的操作。");
@@ -941,7 +1027,7 @@ function buildHelpMessage(plugin: string | null): string {
       "/model",
       "/model set <name>",
       "/model set --global <name>",
-      "/cli",
+      "/cli [--write|--safe]",
       "/sdk",
       "/backend",
       "/mode",

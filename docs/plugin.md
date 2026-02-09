@@ -38,7 +38,7 @@ my-plugin/
 ## 4. 运行模式
 - 默认 `isolate`，隔离进程或 worker 运行
 - `embed` 仅在审核通过后允许
-- sandbox 在隔离模式下默认 on，可按插件覆盖为 off
+- sandbox 在隔离模式下默认 on，可按插件覆盖为 off（需要审批）
 
 ## 5. 生命周期
 - `activate(ctx)` 加载时调用
@@ -73,6 +73,10 @@ my-plugin/
 /plugin runtime <name> isolate|embed
 /plugin sandbox <name> on|off
 ```
+说明：
+- `/plugin runtime <name> embed` 会触发审批，确认后生效
+- `/plugin sandbox <name> off` 会触发审批，确认后生效
+- `/plugin approve <name>` 仅用于“内嵌”审批（sandbox-off 走独立审批）
 
 ## 9. Registry 与状态
 - Registry 建议路径：`store/plugins.json`

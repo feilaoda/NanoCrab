@@ -82,7 +82,7 @@ my-plugin/
 ### 5.1 默认规则（必须）
 - 默认隔离：除非明确审核通过，否则一律 `isolate`。
 - 内嵌审核：只有 Registry 中 `approvedEmbed=true` 的插件才允许 `embed`。
-- sandbox 默认 on：隔离模式下默认启用 sandbox；可被管理员覆盖为 `off`。
+- sandbox 默认 on：隔离模式下默认启用 sandbox；仅 `approvedSandboxOff=true` 才允许 `off`。
 
 ### 5.2 运行决策（伪代码）
 ```
@@ -93,12 +93,15 @@ if registry.approvedEmbed && registry.runtime.mode == "embed":
 
 sandbox = "on"
 if mode == "isolate" and registry.runtime.sandbox in ["on", "off"]:
-  sandbox = registry.runtime.sandbox
+  if registry.runtime.sandbox == "off" and registry.approvedSandboxOff:
+    sandbox = "off"
+  if registry.runtime.sandbox == "on":
+    sandbox = "on"
 ```
 
 ## 6. Sandbox 策略
 - sandbox=on：宿主仅暴露安全 API；所有 FS/NET/SHELL 通过权限检查。
-- sandbox=off：允许更宽松的能力注入（仅管理员可设置）。
+- sandbox=off：允许更宽松的能力注入（需审批）。
 - 允许未来扩展为 OS 级限制（如 seccomp）。
 
 ## 7. 生命周期
@@ -153,6 +156,7 @@ if mode == "isolate" and registry.runtime.sandbox in ["on", "off"]:
     "path": ".../plugins/my-plugin/1.0.0",
     "enabled": true,
     "approvedEmbed": false,
+    "approvedSandboxOff": false,
     "runtime": { "mode": "isolate", "sandbox": "on" },
     "installedAt": "2026-02-08T00:00:00Z"
   }
@@ -190,6 +194,7 @@ if mode == "isolate" and registry.runtime.sandbox in ["on", "off"]:
 
 ## 14. 审核与审计
 - `/plugin approve <name>` 允许内嵌模式。
+- sandbox-off 需单独审批（由 `/plugin sandbox <name> off` 触发）。
 - Registry 记录审核人/时间（可选字段 `approvedBy`, `approvedAt`）。
 
 ## 15. 动态加载实现建议
