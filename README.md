@@ -28,6 +28,7 @@ Feishu + Codex = NanoCrab
     # CODEX_BIN=codex
     # SAFE_DIRS=/Users/feilaoda/workspace/ai/nanocrab   # comma separated
     # CODEX_CMD_BLOCK=mkfs,shutdown,dd,reboot,poweroff,halt
+    # CODEX_COMMIT_MESSAGE_MAX_CHARS=10000
     # CODEX_TIMEOUT_MS=300000
     # MAX_CONTEXT_MESSAGES=20
     # RESTART_CMD="npm run dev"
@@ -82,7 +83,7 @@ Feishu + Codex = NanoCrab
 - `/confirm --last` (execute the last user request immediately)
 - `/cancel` (cancel pending execution or write mode)
 - `/restart` (restart the service using RESTART_CMD; will notify “服务已重启。” once connected)
-- `/git ci [message]` (stage & commit with auto message; omitted message uses git status summary)
+- `/git ci [message]` (stage & commit; omitted message优先使用`.codex_last_message.txt`，否则回退到变更摘要)
 - `/git diff` (list changed files with stats)
 - `/git push` (push current branch)
 - `/resume <id>` (bind CLI session id)
@@ -125,6 +126,7 @@ Endpoints:
 - CLI sessions are stored per workspace; use `/resume <id>` to continue a CLI session.
 - Dangerous commands are blocked via `CODEX_CMD_BLOCK` (e.g. `mkfs,shutdown,dd,reboot,poweroff,halt`).
 - Confirmation is only required when deleting files outside `SAFE_DIRS`; other non-forbidden commands execute automatically.
+- `/git ci` 在未传 message 时优先使用 `.codex_last_message.txt`，超长会按 `CODEX_COMMIT_MESSAGE_MAX_CHARS` 截断（默认 `10000`）。
 - `SAFE_DIRS` restricts which directories can be used by `/dir set` and as working roots. When unset, it defaults to the project root.
 - `/dir set` 会自动把目标目录加入运行时安全列表（不改动 `.env`）。
 - `/confirm` 在无待确认操作时会提示使用 `/confirm --last`，不再进入一次性写入模式。

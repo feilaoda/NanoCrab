@@ -49,6 +49,11 @@ export const CODEX_CMD_ALLOW = parseList(rawCmdAllow || "");
 export const CODEX_BACKEND = "cli";
 export const CODEX_BIN = process.env.CODEX_BIN || "codex";
 export const CODEX_TIMEOUT_MS = Number(process.env.CODEX_TIMEOUT_MS || 300000);
+const rawCodexCommitMessageMaxChars = Number(process.env.CODEX_COMMIT_MESSAGE_MAX_CHARS || 10000);
+export const CODEX_COMMIT_MESSAGE_MAX_CHARS =
+  Number.isFinite(rawCodexCommitMessageMaxChars) && rawCodexCommitMessageMaxChars > 0
+    ? Math.floor(rawCodexCommitMessageMaxChars)
+    : 10000;
 export const MAX_CONTEXT_MESSAGES = Number(process.env.MAX_CONTEXT_MESSAGES || 20);
 
 export const MARKET_ALPHA_VANTAGE_API_KEY = process.env.MARKET_ALPHA_VANTAGE_API_KEY || "";

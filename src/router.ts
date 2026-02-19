@@ -1,8 +1,10 @@
+import fs from "fs";
 import os from "os";
 import path from "path";
 import { spawn } from "child_process";
 
 import {
+  CODEX_COMMIT_MESSAGE_MAX_CHARS,
   DATA_DIR,
   MAX_CONTEXT_MESSAGES,
   PROJECT_ROOT,
@@ -1036,9 +1038,8 @@ async function handleGitCommand(
         return;
       }
 
-      const message = args.slice(1).join(" ").trim() ||
-        buildAutoCommitMessage(status.stdout);
-      const commitResult = await runShell("git", ["commit", "-m", message], workspaceDir);
+      const resolvedMessage = resolveCommitMessage(workspaceDir, status.stdout, args.slice(1));
+      const commitResult = await runGitCommitWithMessage(workspaceDir, resolvedMessage.text);
       if (commitResult.code !== 0) {
         await deps.sendMessage(
           chatId,
@@ -1046,9 +1047,12 @@ async function handleGitCommand(
         );
         return;
       }
+      const suffix = resolvedMessage.truncated
+        ? `（已按 ${CODEX_COMMIT_MESSAGE_MAX_CHARS} 字符截断）`
+        : "";
       await deps.sendMessage(
         chatId,
-        `已提交：${message}\n${(commitResult.stdout || commitResult.stderr).trim() || "(无输出)"}`,
+        `已提交：${previewCommitMessage(resolvedMessage.text)}${suffix}\n${(commitResult.stdout || commitResult.stderr).trim() || "(无输出)"}`,
       );
       return;
     }
@@ -1128,6 +1132,80 @@ function splitCommand(raw: string): { cmd: string; args: string[] } {
 }
 
 type ShellResult = { code: number; stdout: string; stderr: string };
+
+type ResolvedCommitMessage = {
+  text: string;
+  truncated: boolean;
+};
+
+function resolveCommitMessage(
+  workspaceDir: string,
+  statusOutput: string,
+  args: string[],
+): ResolvedCommitMessage {
+  const userMessage = args.join(" ").trim();
+  if (userMessage) return { text: userMessage, truncated: false };
+
+  const codexMessage = readCodexLastMessage(workspaceDir);
+  if (codexMessage) {
+    const normalized = limitCommitMessage(codexMessage, CODEX_COMMIT_MESSAGE_MAX_CHARS);
+    return { text: normalized.text, truncated: normalized.truncated };
+  }
+
+  return { text: buildAutoCommitMessage(statusOutput), truncated: false };
+}
+
+function readCodexLastMessage(workspaceDir: string): string {
+  const messagePath = path.join(workspaceDir, ".codex_last_message.txt");
+  try {
+    if (!fs.existsSync(messagePath)) return "";
+    const raw = fs.readFileSync(messagePath, "utf8");
+    const normalized = raw.replace(/\r\n/g, "\n").trim();
+    return normalized;
+  } catch {
+    return "";
+  }
+}
+
+function limitCommitMessage(
+  input: string,
+  maxChars: number,
+): { text: string; truncated: boolean } {
+  if (input.length <= maxChars) {
+    return { text: input, truncated: false };
+  }
+  return {
+    text: input.slice(0, maxChars).trimEnd(),
+    truncated: true,
+  };
+}
+
+function runGitCommitWithMessage(workspaceDir: string, message: string): Promise<ShellResult> {
+  const tempPath = path.join(
+    os.tmpdir(),
+    `nanocrab-commit-message-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`,
+  );
+  try {
+    fs.writeFileSync(tempPath, `${message}\n`, "utf8");
+  } catch (err) {
+    return Promise.reject(err);
+  }
+
+  return runShell("git", ["commit", "--cleanup=verbatim", "-F", tempPath], workspaceDir)
+    .finally(() => {
+      try {
+        fs.unlinkSync(tempPath);
+      } catch {
+        // Ignore cleanup failure.
+      }
+    });
+}
+
+function previewCommitMessage(message: string): string {
+  const firstLine = message.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "(empty)";
+  if (firstLine.length <= 120) return firstLine;
+  return `${firstLine.slice(0, 117)}...`;
+}
 
 function buildAutoCommitMessage(statusOutput: string): string {
   const entries = parsePorcelainEntries(statusOutput);

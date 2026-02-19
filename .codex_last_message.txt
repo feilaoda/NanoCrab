@@ -1,14 +1,13 @@
-已优化，`/git ci` 的自动提交信息现在更可读了。
+已做完，`/git ci` 现在会把 `.codex_last_message.txt` 用作默认 commit message，并支持长度上限。
 
-- 在 `src/router.ts:1132` 重写了 `buildAutoCommitMessage`，改为基于 `git status --porcelain` 解析真实变更类型。
-- 新增了变更识别与摘要逻辑（`added/modified/deleted/renamed/copied`）：`src/router.ts:1151`
-- 自动推断提交类型：仅文档改动用 `docs`、仅测试改动用 `test`，其他用 `chore`：`src/router.ts:1188`
-- 自动推断 scope（按目录），并对单文件改动生成更直接的 message：`src/router.ts:1195`
-- 多文件提交会带统计摘要，例如：`update 5 files (3 modified, 1 added, 1 deleted)`：`src/router.ts:1236`
+- 提交消息来源改为：`手动 message > .codex_last_message.txt > 变更摘要`，在 `src/router.ts:1041`、`src/router.ts:1141`
+- 新增读取与截断逻辑，超长按上限裁剪：`src/router.ts:1158`、`src/router.ts:1170`
+- `git commit` 改为 `-F` 文件方式，完整支持多行 message：`src/router.ts:1183`
+- 回执里会标记“已截断”：`src/router.ts:1050`
+- 新增可配置上限 `CODEX_COMMIT_MESSAGE_MAX_CHARS`（默认 10000）：`src/config.ts:52`
+- 文档已同步：`README.md:31`、`README.md:129`
 
-效果示例（自动生成）：
-- `docs: update README.md`
-- `chore(router): update src/router.ts`
-- `chore(repo): update 6 files (4 modified, 1 added, 1 renamed)`
+校验：
+- 跑了 `npm run -s typecheck`，仍是仓库既有报错（`src/store/db.ts`、`src/plugins/isolate_runtime.ts`），本次改动未引入新报错。
 
-我跑了 `npm run -s typecheck`，仍是仓库里既有错误（`src/store/db.ts`、`src/plugins/isolate_runtime.ts`），这次改动未引入新报错。
+你如果要改上限，直接在 `.env` 里设：`CODEX_COMMIT_MESSAGE_MAX_CHARS=5000`（或你希望的值）。
