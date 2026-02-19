@@ -4,11 +4,10 @@ import path from "path";
 
 import {
   CODEX_BIN,
-  CODEX_CMD_ALLOW,
   CODEX_CMD_BLOCK,
-  CODEX_CMD_CONFIRM,
   CODEX_TIMEOUT_MS,
   DEFAULT_LANGUAGE,
+  SAFE_DIRS,
 } from "../config.js";
 import { AgentRequest, AgentResponse } from "../types.js";
 import { logger } from "../logger.js";
@@ -16,6 +15,7 @@ import {
   clearConversationCliSessionId,
   getCliSessionIdForWorkspace,
   getConversationCliSessionId,
+  getSafeDirs,
   setCliSessionIdForWorkspace,
   setConversationCliSessionId,
   setWorkspaceForCliSessionId,
@@ -68,7 +68,7 @@ async function runCodexCli(
     args.push("-m", request.modelOverride);
   }
   if (mode === "proposal") {
-    args.push("-s", "read-only");
+    args.push("-s", "workspace-write");
   } else {
     args.push("--full-auto");
   }
@@ -98,7 +98,7 @@ async function runCodexCli(
     return { type: "message", text: output.trim() || "(empty response)", parsed: false };
   }
 
-  const policy = evaluateCommandPolicy(parsed.commands);
+  const policy = evaluateCommandPolicy(parsed.commands, workspaceDir);
   if (policy.blocked) {
     return {
       type: "message",
@@ -227,56 +227,191 @@ function buildPolicyHint(): string {
   if (CODEX_CMD_BLOCK.length > 0) {
     lines.push(`- Forbidden commands: ${CODEX_CMD_BLOCK.join(", ")} (do not propose).\n`);
   }
-  if (CODEX_CMD_CONFIRM.length > 0) {
-    lines.push(`- Commands requiring confirmation: ${CODEX_CMD_CONFIRM.join(", ")}.\n`);
-  }
-  if (CODEX_CMD_ALLOW.length > 0) {
-    lines.push(`- Commands allowed without confirmation: ${CODEX_CMD_ALLOW.join(", ")}.\n`);
-  }
-  lines.push("- If you plan to modify files, set NEEDS_APPROVAL to yes.\n");
-  lines.push("- If commands do not require confirmation and no file edits are needed, set NEEDS_APPROVAL to no.\n");
+  lines.push("- Set NEEDS_APPROVAL to yes only when deleting files outside SAFE_DIRS.\n");
+  lines.push("- Otherwise set NEEDS_APPROVAL to no (including normal file edits and non-forbidden commands).\n");
   if (lines.length === 0) return "";
   return lines.join("");
 }
 
 function computeApprovalDecision(parsed: ProposalResult, policy: CommandPolicy): boolean {
   if (policy.blocked) return true;
-  if (policy.autoExecute) return false;
-  return parsed.needsApproval || policy.needsApproval || parsed.files.length > 0;
+  // Keep confirmation only for delete operations targeting paths outside SAFE_DIRS.
+  return policy.needsApproval;
 }
 
-function evaluateCommandPolicy(commands: string[]): CommandPolicy {
+function evaluateCommandPolicy(commands: string[], workspaceDir: string): CommandPolicy {
   const blockedCommands: string[] = [];
   let needsApproval = false;
 
   const blockPatterns = compilePatterns(CODEX_CMD_BLOCK);
-  const confirmPatterns = compilePatterns(CODEX_CMD_CONFIRM);
-  const allowPatterns = compilePatterns(CODEX_CMD_ALLOW);
 
   const matchBlock = (cmd: string) => matchesAny(cmd, blockPatterns);
-  const matchConfirm = (cmd: string) => matchesAny(cmd, confirmPatterns);
-  const matchAllow = (cmd: string) => matchesAny(cmd, allowPatterns);
 
   for (const cmd of commands) {
     if (matchBlock(cmd)) {
       blockedCommands.push(cmd);
     }
-    if (matchConfirm(cmd)) {
+    if (deletesOutsideSafeDirs(cmd, workspaceDir)) {
       needsApproval = true;
     }
   }
-
-  const allowAll =
-    allowPatterns.length > 0 &&
-    commands.length > 0 &&
-    commands.every((cmd) => matchAllow(cmd));
 
   return {
     blocked: blockedCommands.length > 0,
     blockedCommands,
     needsApproval,
-    autoExecute: allowAll && !needsApproval,
+    autoExecute: commands.length > 0 && !needsApproval,
   };
+}
+
+function deletesOutsideSafeDirs(command: string, workspaceDir: string): boolean {
+  const targets = extractRmTargets(command);
+  if (targets.length === 0) return false;
+  const safeRoots = getSafeRoots(workspaceDir);
+  if (safeRoots.length === 0) return false;
+  return targets.some((target) => isOutsideSafeRoots(target, workspaceDir, safeRoots));
+}
+
+function getSafeRoots(workspaceDir: string): string[] {
+  const merged = [...SAFE_DIRS, ...getSafeDirs(), workspaceDir]
+    .map((dir) => normalizePath(expandHome(dir)))
+    .filter(Boolean);
+  return [...new Set(merged)];
+}
+
+function isOutsideSafeRoots(target: string, workspaceDir: string, safeRoots: string[]): boolean {
+  if (!target || target === "--") return false;
+  // Shell expansions are ambiguous; treat them as requiring confirmation.
+  if (/[`$]/.test(target)) return true;
+  const resolved = resolveTargetPath(target, workspaceDir);
+  return !safeRoots.some((root) => isSubPath(resolved, root));
+}
+
+function resolveTargetPath(target: string, workspaceDir: string): string {
+  const normalizedTarget = normalizePath(expandHome(target));
+  if (path.isAbsolute(normalizedTarget)) {
+    return path.resolve(normalizedTarget);
+  }
+  return path.resolve(workspaceDir, normalizedTarget);
+}
+
+function isSubPath(candidate: string, base: string): boolean {
+  const rel = path.relative(base, candidate);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function expandHome(input: string): string {
+  if (input === "~") return process.env.HOME || input;
+  if (input.startsWith("~/") || input.startsWith("~\\")) {
+    const home = process.env.HOME || "";
+    return path.join(home, input.slice(2));
+  }
+  return input;
+}
+
+function normalizePath(input: string): string {
+  if (!input) return input;
+  const noQuotes = input.replace(/^['"]|['"]$/g, "");
+  return noQuotes;
+}
+
+function extractRmTargets(command: string): string[] {
+  const tokens = shellSplit(command);
+  if (tokens.length === 0) return [];
+  const direct = extractRmTargetsFromTokens(tokens);
+  if (direct.length > 0) return direct;
+  for (let i = 0; i < tokens.length - 1; i += 1) {
+    if ((tokens[i] === "-c" || tokens[i] === "-lc") && tokens[i + 1]) {
+      return extractRmTargets(tokens[i + 1]);
+    }
+  }
+  return [];
+}
+
+function extractRmTargetsFromTokens(tokens: string[]): string[] {
+  const targets: string[] = [];
+  const isOperator = (token: string): boolean =>
+    token === "&&" || token === "||" || token === ";" || token === "|";
+  const isRm = (token: string): boolean =>
+    token === "rm" || token.endsWith("/rm");
+
+  let i = 0;
+  while (i < tokens.length) {
+    if (!isRm(tokens[i])) {
+      i += 1;
+      continue;
+    }
+    i += 1;
+    let afterDoubleDash = false;
+    while (i < tokens.length && !isOperator(tokens[i])) {
+      const token = tokens[i];
+      if (token === "--") {
+        afterDoubleDash = true;
+        i += 1;
+        continue;
+      }
+      if (afterDoubleDash || !token.startsWith("-")) {
+        targets.push(token);
+      }
+      i += 1;
+    }
+  }
+  return targets;
+}
+
+function shellSplit(input: string): string[] {
+  const out: string[] = [];
+  let buf = "";
+  let quote: "'" | "\"" | null = null;
+  let escaped = false;
+  const flush = () => {
+    if (!buf) return;
+    out.push(buf);
+    buf = "";
+  };
+
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    if (escaped) {
+      buf += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+      } else {
+        buf += ch;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === "\"") {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      flush();
+      continue;
+    }
+    if ((ch === "&" || ch === "|") && input[i + 1] === ch) {
+      flush();
+      out.push(ch + ch);
+      i += 1;
+      continue;
+    }
+    if (ch === ";" || ch === "|") {
+      flush();
+      out.push(ch);
+      continue;
+    }
+    buf += ch;
+  }
+  flush();
+  return out;
 }
 
 type CompiledPattern = {

@@ -27,12 +27,14 @@ Feishu + Codex = NanoCrab
     # Optional: Codex
     # CODEX_BIN=codex
     # SAFE_DIRS=/Users/feilaoda/workspace/ai/nanocrab   # comma separated
-    # CODEX_CMD_BLOCK=mkfs,shutdown
-    # CODEX_CMD_CONFIRM=rm,dd
-    # CODEX_CMD_ALLOW=ls,cat,pwd
+    # CODEX_CMD_BLOCK=mkfs,shutdown,dd,reboot,poweroff,halt
     # CODEX_TIMEOUT_MS=300000
     # MAX_CONTEXT_MESSAGES=20
     # RESTART_CMD="npm run dev"
+    # WATCHDOG_CMD="npm run dev"
+    # WATCHDOG_BACKOFF_MS=1000
+    # WATCHDOG_MAX_BACKOFF_MS=30000
+    # WATCHDOG_STABLE_MS=15000
     # Optional: Market
     # MARKET_ALPHA_VANTAGE_API_KEY=xxxx
     # MARKET_REQUEST_GAP_MS=15000
@@ -40,7 +42,11 @@ Feishu + Codex = NanoCrab
    # Optional overrides
    # FEISHU_API_BASE=https://open.feishu.cn
    ```
-3. Start (no auto-reload by default):
+3. Start (recommended for `/restart` auto-relaunch):
+   ```bash
+   npm run watchdog
+   ```
+   Direct dev run (no watchdog):
    ```bash
    npm run dev
    ```
@@ -117,12 +123,15 @@ Endpoints:
 - If you don't set `/model`, Codex CLI will use its default from `~/.codex/config.toml`.
 - By default, you must enter `/codex` to start using Codex.
 - CLI sessions are stored per workspace; use `/resume <id>` to continue a CLI session.
-- Commands can be controlled via `CODEX_CMD_BLOCK` (forbidden), `CODEX_CMD_CONFIRM` (require confirmation), and `CODEX_CMD_ALLOW` (auto-execute without confirmation).
+- Dangerous commands are blocked via `CODEX_CMD_BLOCK` (e.g. `mkfs,shutdown,dd,reboot,poweroff,halt`).
+- Confirmation is only required when deleting files outside `SAFE_DIRS`; other non-forbidden commands execute automatically.
 - `SAFE_DIRS` restricts which directories can be used by `/dir set` and as working roots. When unset, it defaults to the project root.
 - `/dir set` 会自动把目标目录加入运行时安全列表（不改动 `.env`）。
 - `/confirm` 在无待确认操作时会提示使用 `/confirm --last`，不再进入一次性写入模式。
 - 若看到 `NEEDS_APPROVAL` 但 `/confirm` 仍提示无待确认，通常是输出使用了全角冒号导致解析失败；已兼容 `:` 与 `：`。
 - `RESTART_CMD` controls what `/restart` launches (default: `npm run dev`).
+- 若希望 `/restart` 后自动拉起，请用 `npm run watchdog` 启动主进程。
+- Watchdog uses `WATCHDOG_CMD`/`WATCHDOG_BACKOFF_MS`/`WATCHDOG_MAX_BACKOFF_MS`/`WATCHDOG_STABLE_MS`.
 - 行情标的会自动规范化：A 股 6 位代码补 `.SS/.SZ`，港股数字代码补 `.HK`。
 
 ## Operations

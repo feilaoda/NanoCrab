@@ -1,8 +1,14 @@
-NEEDS_APPROVAL: no
-SUMMARY: 说明 rm 需要确认，不能直接执行
-COMMANDS:
-- none
-FILES:
-- none
-RESPONSE:
-不能。`rm` 属于需要确认的命令，必须先确认才会执行。
+已优化，`/git ci` 的自动提交信息现在更可读了。
+
+- 在 `src/router.ts:1132` 重写了 `buildAutoCommitMessage`，改为基于 `git status --porcelain` 解析真实变更类型。
+- 新增了变更识别与摘要逻辑（`added/modified/deleted/renamed/copied`）：`src/router.ts:1151`
+- 自动推断提交类型：仅文档改动用 `docs`、仅测试改动用 `test`，其他用 `chore`：`src/router.ts:1188`
+- 自动推断 scope（按目录），并对单文件改动生成更直接的 message：`src/router.ts:1195`
+- 多文件提交会带统计摘要，例如：`update 5 files (3 modified, 1 added, 1 deleted)`：`src/router.ts:1236`
+
+效果示例（自动生成）：
+- `docs: update README.md`
+- `chore(router): update src/router.ts`
+- `chore(repo): update 6 files (4 modified, 1 added, 1 renamed)`
+
+我跑了 `npm run -s typecheck`，仍是仓库里既有错误（`src/store/db.ts`、`src/plugins/isolate_runtime.ts`），这次改动未引入新报错。

@@ -345,17 +345,17 @@ export async function handleInbound(
     if (writeMode) {
       const response = await runCodex(request, workspaceDir, "proposal", { allowAutoExecute: false });
       if (response.type === "needs_approval") {
-        const execResponse = await runCodex(request, workspaceDir, "execute");
-        if (execResponse.type === "message") {
-          saveMessage(conversationId, "assistant", execResponse.text);
-          await sendCodexReply(
-            deps,
-            msg.chatId,
-            conversationId,
-            execResponse.text || "(无输出)",
-            { mode: "execute", kind: "message" },
-          );
-        }
+        const payload = JSON.stringify({ type: "codex", request, workspaceDir });
+        createApproval(response.approvalId, conversationId, payload);
+        const preface = response.text ? `${response.text}\n\n` : "";
+        await sendCodexReply(
+          deps,
+          msg.chatId,
+          conversationId,
+          `${preface}需要确认后执行。\n摘要：${response.summary}\n回复“确认”继续，回复“取消”终止。`,
+          { mode: "proposal", kind: "approval_prompt" },
+          { request, workspaceDir },
+        );
         return;
       }
 
@@ -698,7 +698,10 @@ async function handleCommand(
       if (writeMode) hints.push("持续自动执行");
       if (confirmNext) hints.push("下一条将自动执行");
       const hint = hints.length ? `（${hints.join("；")}）` : "";
-      await deps.sendMessage(chatId, `当前模式：CLI（workspace-write，执行前可能需要确认）。${hint}`);
+      await deps.sendMessage(
+        chatId,
+        `当前模式：CLI（workspace-write，默认自动执行；仅删除安全目录外文件需确认）。${hint}`,
+      );
       return;
     }
     case "status": {
@@ -706,6 +709,8 @@ async function handleCommand(
       const plugin = getConversationPlugin(conversationId);
       const confirmNext = getConfirmNext(conversationId);
       const writeMode = getWriteMode(conversationId);
+      const cliSessionId =
+        getConversationCliSessionId(conversationId) || getCliSessionIdForWorkspace(workspaceDir);
       const runtimeInfo = getRuntimeInfo();
       const runnerLabel =
         RUNNER_ORIGIN === "codex"
@@ -715,6 +720,7 @@ async function handleCommand(
             : `由 ${RUNNER_ORIGIN} 启动`;
       const lines = [
         `ChatId：${chatId}`,
+        `CLI SessionId：${cliSessionId ?? "无"}`,
         `启动来源：${runnerLabel}`,
         `PID：${runtimeInfo.pid ?? "(未知)"}`,
         `启动时间：${runtimeInfo.startedAt ?? "(未知)"}`,
@@ -1124,21 +1130,140 @@ function splitCommand(raw: string): { cmd: string; args: string[] } {
 type ShellResult = { code: number; stdout: string; stderr: string };
 
 function buildAutoCommitMessage(statusOutput: string): string {
-  const lines = statusOutput.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const files = lines.map((line) => {
-    const trimmed = line.replace(/^\?\?\s+/, "").replace(/^[A-Z.][A-Z.]\s+/, "");
-    return trimmed.split(" -> ").slice(-1)[0];
-  }).filter(Boolean);
-  const unique = Array.from(new Set(files));
-  if (unique.length === 0) {
-    return "chore: update files";
+  const entries = parsePorcelainEntries(statusOutput);
+  if (entries.length === 0) return "chore: update files";
+
+  const type = inferCommitType(entries);
+  const scope = inferCommitScope(entries);
+  const subject = summarizeCommit(entries);
+  const prefix = scope ? `${type}(${scope})` : type;
+  return `${prefix}: ${subject}`;
+}
+
+type ChangeKind = "added" | "modified" | "deleted" | "renamed" | "copied";
+
+type PorcelainEntry = {
+  kind: ChangeKind;
+  path: string;
+  oldPath?: string;
+};
+
+function parsePorcelainEntries(statusOutput: string): PorcelainEntry[] {
+  const lines = statusOutput.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  const out: PorcelainEntry[] = [];
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (line.startsWith("!!")) continue;
+    const code = line.slice(0, 2);
+    const body = line.slice(3).trim();
+    if (!body) continue;
+
+    const kind = statusCodeToKind(code);
+    const [fromPath, toPath] = body.includes(" -> ")
+      ? body.split(/\s+->\s+/)
+      : [body, body];
+    const finalPath = (toPath || fromPath || "").trim();
+    if (!finalPath) continue;
+
+    const entry: PorcelainEntry = { kind, path: finalPath };
+    const sourcePath = (fromPath || "").trim();
+    if (kind === "renamed" && sourcePath && sourcePath !== finalPath) {
+      entry.oldPath = sourcePath;
+    }
+    out.push(entry);
   }
-  if (unique.length === 1) {
-    return `chore: update ${unique[0]}`;
+
+  return out;
+}
+
+function statusCodeToKind(code: string): ChangeKind {
+  if (code === "??" || code.includes("A")) return "added";
+  if (code.includes("R")) return "renamed";
+  if (code.includes("C")) return "copied";
+  if (code.includes("D")) return "deleted";
+  return "modified";
+}
+
+function inferCommitType(entries: PorcelainEntry[]): "docs" | "test" | "chore" {
+  const files = entries.map((entry) => entry.path);
+  if (files.every((file) => isDocFile(file))) return "docs";
+  if (files.every((file) => isTestFile(file))) return "test";
+  return "chore";
+}
+
+function inferCommitScope(entries: PorcelainEntry[]): string | null {
+  const scopes = new Set<string>();
+  for (const entry of entries) {
+    const scope = fileScope(entry.path);
+    if (scope) scopes.add(scope);
   }
-  const preview = unique.slice(0, 3).join(", ");
-  const suffix = unique.length > 3 ? ", ..." : "";
-  return `chore: update ${unique.length} files (${preview}${suffix})`;
+  const list = Array.from(scopes);
+  if (list.length === 0) return null;
+  if (list.length === 1) return list[0];
+  if (list.length === 2) return `${list[0]}-${list[1]}`;
+  return "repo";
+}
+
+function fileScope(file: string): string | null {
+  const normalized = file.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.length === 0) return null;
+  if (parts.length === 1) {
+    return parts[0].includes(".") ? null : parts[0];
+  }
+  if ((parts[0] === "src" || parts[0] === "tests") && parts.length >= 2) {
+    return parts[1];
+  }
+  return parts[0];
+}
+
+function isDocFile(file: string): boolean {
+  const normalized = file.replace(/\\/g, "/").toLowerCase();
+  return normalized.startsWith("docs/")
+    || normalized === "readme.md"
+    || normalized.endsWith(".md")
+    || normalized.endsWith(".mdx")
+    || normalized.endsWith(".rst")
+    || normalized.endsWith(".txt");
+}
+
+function isTestFile(file: string): boolean {
+  const normalized = file.replace(/\\/g, "/").toLowerCase();
+  return normalized.includes("/tests/")
+    || normalized.startsWith("tests/")
+    || normalized.includes("/__tests__/")
+    || /\.(test|spec)\.[a-z0-9]+$/.test(normalized);
+}
+
+function summarizeCommit(entries: PorcelainEntry[]): string {
+  if (entries.length === 1) {
+    const only = entries[0];
+    if (only.kind === "added") return `add ${only.path}`;
+    if (only.kind === "deleted") return `remove ${only.path}`;
+    if (only.kind === "renamed" && only.oldPath) return `rename ${only.oldPath} to ${only.path}`;
+    if (only.kind === "copied") return `copy ${only.path}`;
+    return `update ${only.path}`;
+  }
+
+  const uniqueFiles = new Set(entries.map((entry) => entry.path));
+  const counts: Record<ChangeKind, number> = {
+    added: 0,
+    modified: 0,
+    deleted: 0,
+    renamed: 0,
+    copied: 0,
+  };
+  for (const entry of entries) counts[entry.kind] += 1;
+
+  const parts: string[] = [];
+  if (counts.added > 0) parts.push(`${counts.added} added`);
+  if (counts.modified > 0) parts.push(`${counts.modified} modified`);
+  if (counts.deleted > 0) parts.push(`${counts.deleted} deleted`);
+  if (counts.renamed > 0) parts.push(`${counts.renamed} renamed`);
+  if (counts.copied > 0) parts.push(`${counts.copied} copied`);
+
+  return `update ${uniqueFiles.size} files (${parts.join(", ")})`;
 }
 
 async function runShell(cmd: string, args: string[], cwd: string): Promise<ShellResult> {

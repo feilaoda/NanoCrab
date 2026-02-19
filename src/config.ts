@@ -38,7 +38,9 @@ export const SAFE_DIRS = normalizeDirList(
 const rawCmdBlock = process.env.CODEX_CMD_BLOCK;
 const rawCmdConfirm = process.env.CODEX_CMD_CONFIRM;
 const rawCmdAllow = process.env.CODEX_CMD_ALLOW;
-export const CODEX_CMD_BLOCK = parseList(rawCmdBlock || "");
+export const CODEX_CMD_BLOCK = rawCmdBlock === undefined
+  ? ["mkfs", "shutdown", "dd", "reboot", "poweroff", "halt"]
+  : parseList(rawCmdBlock);
 export const CODEX_CMD_CONFIRM = rawCmdConfirm === undefined
   ? ["rm", "dd"]
   : parseList(rawCmdConfirm);
